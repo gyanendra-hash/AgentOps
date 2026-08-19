@@ -1,0 +1,43 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  rate-limiter:
+    build:
+      context: .
+      dockerfile: services/rate_limiter/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  dummy-backend:
+    build:
+      context: .
+      dockerfile: services/dummy_backend/Dockerfile
+    ports:
+      - "9000:9000"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    environment:
+      RATE_LIMITER_URL: http://rate-limiter:8001
+      ROUTING_TABLE: '{"backend":["http://dummy-backend:9000"]}'
+      FAIL_OPEN: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - rate-limiter
+      - dummy-backend
