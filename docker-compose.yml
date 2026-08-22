@@ -41,3 +41,47 @@ services:
     depends_on:
       - rate-limiter
       - dummy-backend
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentops
+      POSTGRES_PASSWORD: agentops
+      POSTGRES_DB: agentops
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentops"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://agentops:agentops@postgres:5432/agentops
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-pool:
+    build:
+      context: .
+      dockerfile: services/worker_pool/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_URL: http://scheduler:8002
+    ports:
+      - "8003:8003"
+    depends_on:
+      redis:
+        condition: service_healthy
+      scheduler:
+        condition: service_started

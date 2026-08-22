@@ -20,17 +20,30 @@ Checked items are implemented and covered by passing tests.
 
 ## Milestone 2 — Task Scheduler + Worker Pool
 
-- [ ] 2.1 — Job schema + Postgres migration
-- [ ] 2.2 — In-memory Min-Heap priority queue
-- [ ] 2.3 — DAG dependency model + topological sort (Kahn's algorithm), cycle rejection
-- [ ] 2.4 — Persist queue state to Redis
-- [ ] 2.5 — Basic Worker Pool: pull job, execute mock task, update status
-- [ ] 2.6 — Retry with exponential backoff + Dead-Letter Queue
-- [ ] 2.7 — Leader election (Redis `SETNX` + TTL), tested with 2+ replicas
-- [ ] 2.8 — Integration test: 5-job DAG, mixed priorities, correct dispatch order
-- [ ] 2.9 — Bug-fix pass: concurrent pop races, TTL-expiry edge cases, starvation checks
+- [x] 2.1 — Job schema + Postgres migration (`services/scheduler/migrations/001_create_jobs.sql`)
+- [x] 2.2 — In-memory Min-Heap priority queue (`services/scheduler/app/heap.py`)
+- [x] 2.3 — DAG dependency model + topological sort (Kahn's algorithm), cycle rejection (`services/scheduler/app/dag.py`)
+- [x] 2.4 — Persist queue state to Redis (`libs/agentops_common/agentops_common/queue.py`)
+- [x] 2.5 — Basic Worker Pool: pull job, execute mock task, update status (`services/worker_pool/app/worker.py`)
+- [x] 2.6 — Retry with exponential backoff + Dead-Letter Queue (`services/worker_pool/app/retry.py`, `agentops_common/queue.py`)
+- [x] 2.7 — Leader election (Redis `SETNX` + TTL), tested with 2+ replicas (`services/scheduler/app/leader_election.py`)
+- [x] 2.8 — Integration test: 5-job DAG, mixed priorities, correct dispatch order (`test_five_job_dag_mixed_priorities_dispatch_order`)
+- [x] 2.9 — Bug-fix pass: concurrent pop races (`test_concurrent_dispatch_next_never_double_dispatches`), TTL-expiry edge cases (`test_expired_lock_lets_another_replica_take_over`), starvation checks (`test_older_equal_priority_job_not_starved_by_newer_arrivals`)
 
-**Status: not started.**
+**Status: complete.** 47 tests passing (`services/scheduler`: 34, `services/worker_pool`: 13), on top of the 24 from Milestone 1.
+
+**Deliverable:** submit a batch of jobs with priorities and dependencies via
+`POST /v1/jobs`; the leader-elected Scheduler replica resolves the DAG,
+dispatches READY jobs in priority order over Redis, and the Worker Pool
+executes them with exponential-backoff retries and a Dead-Letter Queue for
+exhausted jobs — see
+[services/scheduler/tests](services/scheduler/tests) and
+[services/worker_pool/tests](services/worker_pool/tests).
+
+**Known limitation carried into a later pass:** the ready-queue heap only
+prevents starvation *within* a priority tier (FIFO); a continuous stream of
+higher-priority jobs can still starve a lower-priority tier indefinitely.
+Priority aging isn't implemented.
 
 ## Milestone 3 — Agentic AI: RAG Q&A (no tool-calling yet)
 

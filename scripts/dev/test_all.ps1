@@ -1,6 +1,6 @@
 $RootDir = Resolve-Path "$PSScriptRoot\..\.."
 
-$Services = @("rate_limiter", "gateway")
+$Services = @("rate_limiter", "gateway", "scheduler", "worker_pool")
 
 foreach ($Service in $Services) {
     $ServiceDir = Join-Path $RootDir "services\$Service"
