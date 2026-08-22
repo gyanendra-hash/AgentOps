@@ -10,6 +10,18 @@ failures using RAG over system logs and runbooks.
 Full requirements and design live in [docs/SRS.md](docs/SRS.md). Build status and
 per-milestone checklists live in [ROADMAP.md](ROADMAP.md).
 
+- [Architecture](#architecture)
+- [Quickstart](#quickstart)
+- [Local development (without Docker)](#local-development-without-docker)
+- [Running tests](#running-tests)
+- [Load testing](#load-testing)
+- [API reference (Milestone 1)](#api-reference-milestone-1)
+- [API reference (Milestone 2)](#api-reference-milestone-2)
+- [Design decisions](#design-decisions)
+- [Repository layout](#repository-layout)
+- [Branches](#branches)
+- [Roadmap](#roadmap)
+
 ## Architecture
 
 ```
@@ -209,23 +221,46 @@ agent-driven re-drive.
 
 ```
 AgentOps/
-├── docs/                  SRS and design notes
-├── infra/                 Redis config, other infra assets
-├── libs/agentops_common/  Shared Pydantic models + Redis helpers
+├── docs/
+│   └── SRS.md             Full requirements + per-milestone low-level design
+├── libs/agentops_common/  Shared Pydantic models + Redis queue/DLQ helpers
 ├── services/
-│   ├── rate_limiter/      Milestone 1
-│   ├── gateway/           Milestone 1
+│   ├── rate_limiter/      Milestone 1 (complete)
+│   ├── gateway/           Milestone 1 (complete)
 │   ├── dummy_backend/     Milestone 1 (test fixture service)
 │   ├── service_registry/  Not started (Milestone 1 uses a static routing table)
 │   ├── scheduler/         Milestone 2 (complete)
 │   ├── worker_pool/       Milestone 2 (complete)
-│   └── agent_ops/         Milestones 3-6
+│   └── agent_ops/         Milestones 3-6, not started
 ├── scripts/
 │   ├── loadtest/          Locust load-test scripts
-│   └── dev/               Local dev/test helper scripts
-├── docker-compose.yml
+│   └── dev/               Local dev/test helper scripts (test_all.sh / .ps1)
+├── .env.example           Template for a local .env (copy before `docker compose up`)
+├── docker-compose.yml     Redis, Postgres, and every service, wired together
 └── ROADMAP.md             Milestone-by-milestone status
 ```
+
+Every `services/*` entry other than `dummy_backend` follows the same
+internal shape: `app/` (FastAPI app + business logic), `tests/` (pytest,
+mocks only — no Docker required), `Dockerfile`, `requirements.txt` /
+`requirements-dev.txt`, and `pytest.ini`. `scheduler/` additionally has a
+`migrations/` folder of raw SQL run at startup.
+
+## Branches
+
+| Branch | Purpose |
+|---|---|
+| `main` | Current, deployable state of the whole repo — both milestones merged in |
+| `stage` | Staging environment target |
+| `dev` | Active development target |
+| `prod` | Production deployment target |
+| `milestone-1-rate-limiter-gateway` | Kept as a historical snapshot of Milestone 1 in isolation |
+
+`main`, `stage`, `dev`, and `prod` currently point at the same commit; they
+diverge as work lands on `dev`, gets promoted to `stage` for verification,
+and finally to `prod`. `milestone-1-rate-limiter-gateway` is not part of that
+flow — it's a frozen reference branch, kept for history rather than
+continued development.
 
 ## Roadmap
 
