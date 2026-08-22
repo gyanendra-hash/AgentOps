@@ -47,16 +47,34 @@ Priority aging isn't implemented.
 
 ## Milestone 3 — Agentic AI: RAG Q&A (no tool-calling yet)
 
-- [ ] 3.1 — pgvector extension + embeddings table
-- [ ] 3.2 — Sample runbook covering 5-10 failure scenarios
-- [ ] 3.3 — Ingestion script: chunk + embed + store
-- [ ] 3.4 — Standalone top-k retrieval function
-- [ ] 3.5 — Single LangGraph node: question → retrieve → grounded answer
-- [ ] 3.6 — Manual test with 10 sample debugging questions
-- [ ] 3.7 — Cross-encoder reranking step
-- [ ] 3.8 — Bug-fix pass: chunk size/overlap tuning, irrelevant-chunk filtering
+- [x] 3.1 — pgvector extension + embeddings table (`services/agent_ops/migrations/001_create_embeddings.sql`)
+- [x] 3.2 — Sample runbook covering 5-10 failure scenarios (`services/agent_ops/runbook/runbook.md`, 10 scenarios)
+- [x] 3.3 — Ingestion script: chunk + embed + store (`services/agent_ops/app/ingest.py`)
+- [x] 3.4 — Standalone top-k retrieval function (`services/agent_ops/app/retrieval.py::retrieve`)
+- [x] 3.5 — Single LangGraph node: question → retrieve → grounded answer (`services/agent_ops/app/graph.py`)
+- [x] 3.6 — Manual test with 10 sample debugging questions (`test_question_retrieves_grounded_context`, automated — one parametrized case per question instead of a one-off manual check)
+- [x] 3.7 — Cross-encoder reranking step (`services/agent_ops/app/reranker.py::CrossEncoderReranker`)
+- [x] 3.8 — Bug-fix pass: `min_score` cutoff drops irrelevant chunks instead of forcing them into context (`test_min_score_filters_out_irrelevant_context`); chunk size/overlap tunable via `CHUNK_SIZE`/`CHUNK_OVERLAP`
 
-**Status: not started.**
+**Status: complete.** 97 tests passing (14 rate-limiter, 10 gateway, 34
+scheduler, 13 worker-pool, 26 agent-ops).
+
+**Deliverable:** `POST /v1/debug/ask {"question": "..."}` on the Agent Ops
+service returns an answer grounded in the ingested runbook, plus its
+`sources`. Retrieval, reranking, and answer generation all sit behind
+provider interfaces (`EmbeddingProvider`, `Reranker`, `AnswerGenerator`), so
+the full pipeline is unit-tested with fakes — no Postgres, no downloaded
+model, no LLM API key required to run the test suite. Real deployment needs
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for answer generation; embeddings
+default to the self-hosted `bge-small-en` (no key needed) but can switch to
+`text-embedding-3-small` via `EMBEDDING_PROVIDER=openai`.
+
+**Known limitation carried into a later pass:** the LangGraph here is a
+single node with no branching — that's intentional for this milestone (see
+`app/graph.py`), but it means there's no `classify_intent`/`clarify` routing
+yet. Every question is treated as a debugging question; non-debugging
+queries just get "I don't have enough information" once nothing scores
+above `RAG_MIN_SCORE`. Multi-intent routing is Milestone 5.
 
 ## Milestone 4 — Agentic AI: Tool-Calling
 

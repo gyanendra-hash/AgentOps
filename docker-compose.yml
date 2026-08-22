@@ -43,7 +43,9 @@ services:
       - dummy-backend
 
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 is a drop-in postgres:16 image with the
+    # pgvector extension pre-built, needed by agent-ops for embeddings.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: agentops
       POSTGRES_PASSWORD: agentops
@@ -85,3 +87,19 @@ services:
         condition: service_healthy
       scheduler:
         condition: service_started
+
+  agent-ops:
+    build:
+      context: .
+      dockerfile: services/agent_ops/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://agentops:agentops@postgres:5432/agentops
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8004:8004"
+    depends_on:
+      postgres:
+        condition: service_healthy

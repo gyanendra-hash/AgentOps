@@ -17,6 +17,7 @@ per-milestone checklists live in [ROADMAP.md](ROADMAP.md).
 - [Load testing](#load-testing)
 - [API reference (Milestone 1)](#api-reference-milestone-1)
 - [API reference (Milestone 2)](#api-reference-milestone-2)
+- [API reference (Milestone 3)](#api-reference-milestone-3)
 - [Design decisions](#design-decisions)
 - [Repository layout](#repository-layout)
 - [Branches](#branches)
@@ -42,7 +43,7 @@ Six independently deployable services, each owning its own data:
 | [`services/service_registry`](services/service_registry) | Track healthy service instances | Redis (TTL keys) | Not started — Milestone 1 ships with a static routing table instead |
 | [`services/scheduler`](services/scheduler) | Priority + dependency-aware job dispatch, leader election | PostgreSQL, Redis | Milestone 2 |
 | [`services/worker_pool`](services/worker_pool) | Execute jobs, retry, DLQ | Redis (calls Scheduler API for job state) | Milestone 2 |
-| [`services/agent_ops`](services/agent_ops) | NL control plane: routing, tool-calling, RAG debugging | PostgreSQL + pgvector, Redis | Milestones 3-6 |
+| [`services/agent_ops`](services/agent_ops) | RAG-grounded debugging today; routing + tool-calling from Milestone 4 | PostgreSQL + pgvector | Milestone 3 |
 
 Shared code (Pydantic models, Redis helpers) lives in
 [`libs/agentops_common`](libs/agentops_common), imported by every service as an
@@ -57,10 +58,10 @@ cp .env.example .env
 docker compose up --build
 ```
 
-This brings up Redis, Postgres, the Rate Limiter, the Gateway, a dummy
-backend, the Scheduler, and the Worker Pool. The Gateway listens on
-`http://localhost:8080` and forwards `/api/*` to the dummy backend after a
-rate-limit check.
+This brings up Redis, Postgres (with pgvector), the Rate Limiter, the
+Gateway, a dummy backend, the Scheduler, the Worker Pool, and Agent Ops. The
+Gateway listens on `http://localhost:8080` and forwards `/api/*` to the
+dummy backend after a rate-limit check.
 
 ```bash
 curl -i http://localhost:8080/api/ping -H "X-Client-Id: demo"
@@ -79,6 +80,16 @@ curl -s -X POST http://localhost:8002/v1/jobs \
 
 `b` stays `PENDING` until `a` reaches `SUCCEEDED`; poll either job with
 `GET /v1/jobs/{id}`.
+
+Ask the Agent Ops service a debugging question grounded in the bundled
+runbook (needs `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` set in `.env` first —
+see [API reference (Milestone 3)](#api-reference-milestone-3)):
+
+```bash
+curl -s -X POST http://localhost:8004/v1/debug/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "the dead letter queue is growing fast, what should I check?"}'
+```
 
 ## Local development (without Docker)
 
@@ -108,14 +119,24 @@ pip install -r requirements.txt -r requirements-dev.txt -e ../../libs/agentops_c
 PYTHONPATH=. pytest -v
 ```
 
-All four services' tests run fully in-process against
-[`fakeredis`](https://github.com/cunla/fakeredis-py), `respx`, and (for the
-Scheduler) an in-memory fake of the Postgres repository — no Docker or
-network access required. 71 tests currently pass (14 rate-limiter, 10
-gateway, 34 scheduler, 13 worker-pool), including a rate-limiter concurrency
-test that fires 50 parallel requests at a bucket of capacity 10 and asserts
-exactly 10 are allowed, and a scheduler test that dispatches a 5-job DAG with
-mixed priorities and asserts the exact dispatch order.
+All five services' tests run fully in-process against
+[`fakeredis`](https://github.com/cunla/fakeredis-py), `respx`, and in-memory
+fakes of the Postgres/pgvector repositories — no Docker, no downloaded
+embedding model, and no LLM API key required. 97 tests currently pass (14
+rate-limiter, 10 gateway, 34 scheduler, 13 worker-pool, 26 agent-ops),
+including a rate-limiter concurrency test that fires 50 parallel requests at
+a bucket of capacity 10 and asserts exactly 10 are allowed, a scheduler test
+that dispatches a 5-job DAG with mixed priorities and asserts the exact
+dispatch order, and an agent-ops test that runs 10 sample debugging
+questions through retrieval and checks each one is grounded in the right
+runbook section.
+
+`services/agent_ops/requirements.txt` pulls in `sentence-transformers`
+(for the self-hosted embedding + reranking models) and `torch` as a
+transitive dependency — installing it is noticeably slower than the other
+services' dependencies, but none of it is required to actually *run* the
+tests, since they exercise fakes behind the same provider interfaces the
+real implementations use.
 
 ## Load testing
 
@@ -172,6 +193,35 @@ dispatch queue and calls back into the Scheduler's `PATCH` endpoint. `GET
 /v1/dlq` lists jobs that exhausted their retry budget, for manual or
 agent-driven re-drive.
 
+## API reference (Milestone 3)
+
+**Agent Ops** — `POST /v1/debug/ask`:
+
+```json
+{"question": "why is the gateway returning 503 for every request?"}
+```
+
+```json
+{
+  "answer": "The Rate Limiter is unreachable and FAIL_OPEN=false, so the Gateway is rejecting everything...",
+  "sources": ["runbook"]
+}
+```
+
+On first boot, the service ingests the bundled
+[`runbook/runbook.md`](services/agent_ops/runbook/runbook.md) (10 on-call
+scenarios) if the `embeddings` table is empty — no separate ingestion step
+needed for the demo. Retrieval drops any chunk scoring below `RAG_MIN_SCORE`
+(default `0.3`); if everything gets filtered out, the answer is "I don't
+have enough information" instead of a hallucinated guess. `GET /health`
+checks the process is up (it doesn't touch Postgres or the LLM).
+
+This endpoint needs a real LLM key to answer for real —
+`OPENAI_API_KEY` (default) or `ANTHROPIC_API_KEY` with
+`LLM_PROVIDER=anthropic`. Embeddings default to the self-hosted
+`bge-small-en` (`EMBEDDING_PROVIDER=local`, no key needed); switch to
+`EMBEDDING_PROVIDER=openai` for `text-embedding-3-small` instead.
+
 ## Design decisions
 
 - **Atomicity via Lua, not read-modify-write.** Both algorithms run as a
@@ -216,6 +266,34 @@ agent-driven re-drive.
   immediately; each worker poll promotes only the entries whose delay has
   elapsed, so exponential backoff actually delays the retry instead of just
   labeling it.
+- **Every RAG stage is a swappable interface, tested with a fake.**
+  `EmbeddingProvider`, `Reranker`, and `AnswerGenerator` are each a
+  `Protocol` with a real (model/API-backed) implementation and a fake used
+  in tests — the same repository-abstraction pattern as the Scheduler, so
+  the retrieve → rerank → generate pipeline is fully unit-tested without a
+  downloaded model, Postgres, or an LLM API key.
+- **Cross-encoder reranking only runs on the top-k, not the whole corpus.**
+  A cross-encoder scores each `(query, chunk)` pair jointly and is far more
+  accurate than the initial vector search, but too slow to run over every
+  stored chunk — it only re-scores the handful of candidates vector search
+  already narrowed down to.
+- **Irrelevant context is dropped, not force-fed to the LLM.** Retrieval
+  filters out anything scoring below `RAG_MIN_SCORE` (ROADMAP 3.8); if
+  nothing clears the bar, the answer is an explicit "I don't have enough
+  information" instead of the LLM being handed unrelated chunks and asked
+  to make something up anyway.
+- **Answer generation has no self-hosted fallback, by design.** Embeddings
+  and reranking both default to self-hosted models specifically so a fresh
+  checkout can ingest and retrieve without any API key; the final answer
+  still needs a real LLM call (SRS 9: "OpenAI gpt-4o-mini or Claude API"),
+  since there's no local model in the stack (Ollama is called out in SRS 10
+  as a stretch goal, not a v1 requirement).
+- **The single LangGraph node is one node on purpose, not a shortcut.**
+  SRS 6.5.1's full graph (`classify_intent -> route -> {scheduler_agent |
+  debug_agent | monitor_agent} -> clarify -> respond`) has no branching to
+  justify until intent classification exists (Milestone 5) — `answer_question`
+  in `app/graph.py` is written to become the `debug_agent` node in that
+  larger graph, not to be rewritten from scratch.
 
 ## Repository layout
 
@@ -231,20 +309,21 @@ AgentOps/
 │   ├── service_registry/  Not started (Milestone 1 uses a static routing table)
 │   ├── scheduler/         Milestone 2 (complete)
 │   ├── worker_pool/       Milestone 2 (complete)
-│   └── agent_ops/         Milestones 3-6, not started
+│   └── agent_ops/         Milestone 3 (complete); routing/tool-calling from Milestone 4
 ├── scripts/
 │   ├── loadtest/          Locust load-test scripts
 │   └── dev/               Local dev/test helper scripts (test_all.sh / .ps1)
 ├── .env.example           Template for a local .env (copy before `docker compose up`)
-├── docker-compose.yml     Redis, Postgres, and every service, wired together
+├── docker-compose.yml     Redis, Postgres (+pgvector), and every service, wired together
 └── ROADMAP.md             Milestone-by-milestone status
 ```
 
 Every `services/*` entry other than `dummy_backend` follows the same
 internal shape: `app/` (FastAPI app + business logic), `tests/` (pytest,
 mocks only — no Docker required), `Dockerfile`, `requirements.txt` /
-`requirements-dev.txt`, and `pytest.ini`. `scheduler/` additionally has a
-`migrations/` folder of raw SQL run at startup.
+`requirements-dev.txt`, and `pytest.ini`. `scheduler/` and `agent_ops/`
+additionally have a `migrations/` folder of raw SQL run at startup;
+`agent_ops/` also has `runbook/runbook.md`, the document it ingests for RAG.
 
 ## Branches
 
@@ -265,6 +344,6 @@ continued development.
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the full milestone breakdown and current status.
-Milestones 1 (Rate Limiter + API Gateway) and 2 (Task Scheduler + Worker Pool)
-are implemented and tested; later milestones are scaffolded with stub
-services and will be filled in incrementally.
+Milestones 1 (Rate Limiter + API Gateway), 2 (Task Scheduler + Worker Pool),
+and 3 (RAG Q&A) are implemented and tested; later milestones (tool-calling,
+multi-agent routing, observability) are not started yet.
