@@ -74,6 +74,9 @@ class Scheduler:
     async def cancel_job(self, job_id: str) -> JobRecord | None:
         return await self.repository.cancel(job_id)
 
+    async def queue_depth(self) -> dict[JobStatus, int]:
+        return await self.repository.count_by_status()
+
     async def refresh_ready_jobs(self) -> int:
         candidate_ids = await self.repository.find_ready_candidates()
         if not candidate_ids:

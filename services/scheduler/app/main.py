@@ -9,6 +9,7 @@ from agentops_common.models import (
     JobBatchRequest,
     JobBatchResponse,
     JobResponse,
+    JobStatsResponse,
     JobStatus,
     JobStatusUpdateRequest,
 )
@@ -81,6 +82,16 @@ async def submit_jobs(payload: JobBatchRequest, request: Request) -> JobBatchRes
     # preserve request order rather than dict iteration order
     ordered = [records[job.ref] for job in payload.jobs]
     return JobBatchResponse(jobs=[_to_response(r) for r in ordered])
+
+
+@app.get("/v1/jobs/stats", response_model=JobStatsResponse)
+async def job_stats(request: Request) -> JobStatsResponse:
+    """Queue depth per status, for the Monitor Agent (Milestone 5). Must be
+    registered before GET /v1/jobs/{job_id} -- otherwise "stats" would match
+    as a job_id path param instead of this route."""
+    scheduler: Scheduler = request.app.state.scheduler
+    counts = await scheduler.queue_depth()
+    return JobStatsResponse(counts=counts)
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobResponse)

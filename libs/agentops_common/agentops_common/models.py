@@ -19,6 +19,15 @@ class RateLimitCheckResponse(BaseModel):
     retry_after: Optional[float] = None
 
 
+class RateLimitStatusResponse(BaseModel):
+    """Current bucket state for a client/tier, without consuming a request
+    (used by the Monitor Agent, Milestone 5)."""
+
+    algorithm: Literal["token_bucket", "sliding_window"]
+    remaining: float
+    limit: float
+
+
 class JobStatus(str, Enum):
     PENDING = "PENDING"
     READY = "READY"
@@ -72,3 +81,10 @@ class JobStatusUpdateRequest(BaseModel):
     status: JobStatus
     error: Optional[str] = None
     increment_attempt: bool = False
+
+
+class JobStatsResponse(BaseModel):
+    """Job counts per status -- "queue depth" for the Monitor Agent
+    (Milestone 5). Only non-zero statuses are included."""
+
+    counts: dict[JobStatus, int]

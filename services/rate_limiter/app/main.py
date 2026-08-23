@@ -1,7 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from redis.asyncio import Redis
 
-from agentops_common.models import RateLimitCheckRequest, RateLimitCheckResponse
+from agentops_common.models import (
+    RateLimitCheckRequest,
+    RateLimitCheckResponse,
+    RateLimitStatusResponse,
+)
 from app.algorithms import RateLimitResult, SlidingWindowLimiter, TokenBucketLimiter
 from app.config import get_settings
 from app.redis_client import get_redis
@@ -48,6 +52,27 @@ async def check_rate_limit(payload: RateLimitCheckRequest) -> RateLimitCheckResp
         remaining=result.remaining,
         limit=result.limit,
         retry_after=result.retry_after,
+    )
+
+
+@app.get("/v1/rate-limit/status", response_model=RateLimitStatusResponse)
+async def rate_limit_status(client_id: str, tier: str = "default") -> RateLimitStatusResponse:
+    """Read-only status check for the Monitor Agent (Milestone 5) -- calls
+    the same algorithm.check() as a real request, but with cost=0. Neither
+    algorithm's Lua script consumes anything or changes remaining capacity
+    at cost=0 (token bucket recomputes the refill and rewrites the same
+    value; sliding window's INCRBY-by-0 is a no-op), so this never denies
+    or spends a token on the caller's behalf."""
+    settings = get_settings()
+    tier_config = settings.tiers.get(tier)
+    if tier_config is None:
+        raise HTTPException(status_code=404, detail=f"unknown tier: {tier}")
+
+    redis = get_redis()
+    result = await _run_check(redis, client_id, tier, cost=0)
+
+    return RateLimitStatusResponse(
+        algorithm=tier_config.algorithm, remaining=result.remaining, limit=result.limit
     )
 
 

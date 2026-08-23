@@ -168,3 +168,28 @@ async def test_cancel_job_endpoint_returns_404_for_unknown_job():
         response = await client.post("/v1/jobs/does-not-exist/cancel")
 
     assert response.status_code == 404
+
+
+async def test_job_stats_endpoint_returns_counts_by_status():
+    async with await _client() as client:
+        await client.post("/v1/jobs", json={"jobs": [{"ref": "a", "name": "a"}]})
+        submit_response = await client.post("/v1/jobs", json={"jobs": [{"ref": "b", "name": "b"}]})
+        job_id = submit_response.json()["jobs"][0]["id"]
+        await client.patch(f"/v1/jobs/{job_id}/status", json={"status": "DLQ", "error": "boom"})
+
+        stats_response = await client.get("/v1/jobs/stats")
+
+    assert stats_response.status_code == 200
+    counts = stats_response.json()["counts"]
+    assert counts["DLQ"] == 1
+    assert counts["PENDING"] == 1
+
+
+async def test_job_stats_route_does_not_collide_with_job_id_route():
+    # regression: /v1/jobs/stats must resolve to the stats route, not
+    # GET /v1/jobs/{job_id} with job_id="stats"
+    async with await _client() as client:
+        response = await client.get("/v1/jobs/stats")
+
+    assert response.status_code == 200
+    assert "counts" in response.json()

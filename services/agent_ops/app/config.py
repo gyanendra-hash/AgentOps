@@ -22,6 +22,7 @@ class Settings(BaseModel):
 
     scheduler_url: str = "http://localhost:8002"
     confirmation_ttl_seconds: float = 300.0
+    rate_limiter_url: str = "http://localhost:8001"
 
 
 @lru_cache
@@ -42,4 +43,5 @@ def get_settings() -> Settings:
         chunk_overlap=int(os.environ.get("CHUNK_OVERLAP", "50")),
         scheduler_url=os.environ.get("SCHEDULER_URL", "http://localhost:8002"),
         confirmation_ttl_seconds=float(os.environ.get("CONFIRMATION_TTL_SECONDS", "300")),
+        rate_limiter_url=os.environ.get("RATE_LIMITER_URL", "http://localhost:8001"),
     )

@@ -64,3 +64,9 @@ class SchedulerClient:
         response = await self._request("GET", "/v1/jobs", params=params)
         response.raise_for_status()
         return response.json()["jobs"]
+
+    async def queue_depth(self) -> dict:
+        """ROADMAP 5.3: job counts per status, for the Monitor Agent."""
+        response = await self._request("GET", "/v1/jobs/stats")
+        response.raise_for_status()
+        return response.json()["counts"]

@@ -109,14 +109,31 @@ revisiting if confirmations need to survive a Redis restart.
 
 ## Milestone 5 — Multi-Agent Routing
 
-- [ ] 5.1 — `classify_intent` node
-- [ ] 5.2 — Conditional edges to Scheduler / Debug / Monitor agents
-- [ ] 5.3 — Monitor Agent (rate-limit status, queue depth)
-- [ ] 5.4 — Clarify node for ambiguous intent
-- [ ] 5.5 — End-to-end test: 15 mixed queries, routing accuracy measured
-- [ ] 5.6 — Bug-fix pass: misclassified cases, few-shot examples
+- [x] 5.1 — `classify_intent` node — `services/agent_ops/app/intent.py`, one structured-output call returning `{intent, client_id, tier}`
+- [x] 5.2 — Conditional edges to Scheduler / Debug / Monitor agents — `services/agent_ops/app/orchestrator.py`, routing the Milestone 3/4 graphs in as sub-nodes rather than rebuilding them
+- [x] 5.3 — Monitor Agent (rate-limit status, queue depth) — `services/agent_ops/app/monitor_agent.py`. Needed two new endpoints: Rate Limiter's `GET /v1/rate-limit/status` (read-only peek, doesn't consume a request) and Scheduler's `GET /v1/jobs/stats` (counts per status)
+- [x] 5.4 — Clarify node for ambiguous intent — `clarify_intent` node in `orchestrator.py` (distinct from Milestone 4's destructive-action `clarify` — this one asks the operator to rephrase, not to confirm)
+- [x] 5.5 — End-to-end test: 15 mixed queries, routing accuracy measured — `test_15_mixed_queries_route_to_the_correct_specialist`, asserts 100% of a representative schedule/debug/monitor/ambiguous mix reaches the correct specialist
+- [x] 5.6 — Bug-fix pass: misclassified cases (`_coerce` falls back to `ambiguous` on an out-of-schema response instead of raising), few-shot examples (added to `intent.py`'s system prompt after "how's the queue looking" was initially misrouted to `debug`)
 
-**Status: not started.**
+**Status: complete.** 157 tests passing (17 rate-limiter, 10 gateway, 48
+scheduler, 13 worker-pool, 69 agent-ops).
+
+**Deliverable:** `POST /v1/agent/ask {"question": "..."}` is now the single
+entry point — it classifies intent and routes to whichever specialist
+applies, falling back to a clarifying question when it can't tell.
+`GET /v1/monitor/status` gives deterministic, no-LLM access to the same
+Monitor Agent data for dashboards/health checks that shouldn't depend on an
+LLM call. `/v1/debug/ask` and `/v1/agent/schedule` (Milestones 3/4) still
+work directly, for callers that already know which specialist they want.
+
+**Known limitation carried into a later pass:** the Monitor Agent's
+`client_id`/`tier` extraction depends entirely on `classify_intent` pulling
+them out correctly in one shot; there's no fallback question or clarify step
+if a monitor-intent request names a client ambiguously (e.g. two similar
+client ids in one sentence). Acceptable given the queue-depth half of
+monitoring never needs a client_id at all; worth revisiting if per-client
+monitoring becomes a primary use case.
 
 ## Milestone 6 — Guardrails + Observability (Production-readiness)
 

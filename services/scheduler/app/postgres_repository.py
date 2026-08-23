@@ -168,3 +168,9 @@ class PostgresJobRepository:
             record = await self.get(job_id)
             raise JobNotCancellableError(job_id, record.status if record else JobStatus.CANCELLED)
         return await self.get(job_id)
+
+    async def count_by_status(self) -> dict[JobStatus, int]:
+        query = "SELECT status, count(*) AS n FROM jobs GROUP BY status"
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query)
+        return {JobStatus(row["status"]): row["n"] for row in rows}

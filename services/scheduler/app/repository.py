@@ -80,3 +80,8 @@ class JobRepository(Protocol):
         it exists but isn't in a cancellable status (see
         CANCELLABLE_STATUSES) -- otherwise transitions it to CANCELLED."""
         ...
+
+    async def count_by_status(self) -> dict[JobStatus, int]:
+        """Job counts per status -- "queue depth" for the Monitor Agent
+        (Milestone 5). Statuses with zero jobs are omitted."""
+        ...

@@ -98,3 +98,9 @@ class InMemoryJobRepository:
         record.status = JobStatus.CANCELLED
         record.updated_at = datetime.now(timezone.utc)
         return record
+
+    async def count_by_status(self) -> dict[JobStatus, int]:
+        counts: dict[JobStatus, int] = {}
+        for record in self._jobs.values():
+            counts[record.status] = counts.get(record.status, 0) + 1
+        return counts

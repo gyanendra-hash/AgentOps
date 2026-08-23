@@ -118,3 +118,20 @@ class FakeToolCallingLLM:
     async def decide(self, question: str, tools: list) -> "ToolDecision":  # noqa: F821
         self.calls.append(question)
         return self.decisions.get(question, self.default)
+
+
+class FakeIntentClassifier:
+    """Stands in for a real LLM's intent classification -- same trade-off as
+    FakeToolCallingLLM: tests preprogram question -> IntentClassification so
+    the orchestrator's routing is verified without an LLM call."""
+
+    def __init__(self, decisions: dict | None = None, default=None) -> None:
+        from app.intent import IntentClassification
+
+        self.decisions = decisions or {}
+        self.default = default or IntentClassification(intent="ambiguous")
+        self.calls: list[str] = []
+
+    async def classify(self, question: str) -> "IntentClassification":  # noqa: F821
+        self.calls.append(question)
+        return self.decisions.get(question, self.default)

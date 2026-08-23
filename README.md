@@ -19,6 +19,7 @@ per-milestone checklists live in [ROADMAP.md](ROADMAP.md).
 - [API reference (Milestone 2)](#api-reference-milestone-2)
 - [API reference (Milestone 3)](#api-reference-milestone-3)
 - [API reference (Milestone 4)](#api-reference-milestone-4)
+- [API reference (Milestone 5)](#api-reference-milestone-5)
 - [Design decisions](#design-decisions)
 - [Repository layout](#repository-layout)
 - [Branches](#branches)
@@ -30,8 +31,9 @@ per-milestone checklists live in [ROADMAP.md](ROADMAP.md).
 Client -> API Gateway -> Rate Limiter (Redis)
                        -> Service Registry (healthy instance lookup)
                        -> Backend Service -> Task Scheduler -> Worker Pool -> DLQ
-Operator -> Agentic AI Ops Layer -> Gateway/Scheduler APIs (tool calls)
-                                  -> RAG Vector Store (pgvector)
+Operator -> Agentic AI Ops Layer -> classify_intent -> Scheduler Agent  -> Scheduler API (tool calls)
+                                                     -> Debug Agent     -> RAG Vector Store (pgvector)
+                                                     -> Monitor Agent   -> Scheduler + Rate Limiter APIs
 ```
 
 Six independently deployable services, each owning its own data:
@@ -44,7 +46,7 @@ Six independently deployable services, each owning its own data:
 | [`services/service_registry`](services/service_registry) | Track healthy service instances | Redis (TTL keys) | Not started — Milestone 1 ships with a static routing table instead |
 | [`services/scheduler`](services/scheduler) | Priority + dependency-aware job dispatch, leader election | PostgreSQL, Redis | Milestone 2 |
 | [`services/worker_pool`](services/worker_pool) | Execute jobs, retry, DLQ | Redis (calls Scheduler API for job state) | Milestone 2 |
-| [`services/agent_ops`](services/agent_ops) | RAG-grounded debugging + Scheduler tool-calling; multi-agent routing from Milestone 5 | PostgreSQL + pgvector, Redis | Milestone 4 |
+| [`services/agent_ops`](services/agent_ops) | RAG debugging, Scheduler tool-calling, and intent-routed Monitor Agent | PostgreSQL + pgvector, Redis | Milestone 5 |
 
 Shared code (Pydantic models, Redis helpers) lives in
 [`libs/agentops_common`](libs/agentops_common), imported by every service as an
@@ -110,6 +112,15 @@ curl -s -X POST http://localhost:8004/v1/agent/confirm \
   -d '{"confirmation_token": "<token from above>", "confirmed": true}'
 ```
 
+Or skip deciding which endpoint to call yourself — `/v1/agent/ask` classifies
+the request and routes it to whichever specialist applies:
+
+```bash
+curl -s -X POST http://localhost:8004/v1/agent/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "how'\''s the queue looking right now?"}'
+```
+
 ## Local development (without Docker)
 
 Each service is a standalone FastAPI app with its own `requirements.txt`. From a
@@ -141,16 +152,18 @@ PYTHONPATH=. pytest -v
 All five services' tests run fully in-process against
 [`fakeredis`](https://github.com/cunla/fakeredis-py), [`respx`](https://github.com/lundberg/respx),
 and in-memory fakes of the Postgres/pgvector repositories — no Docker, no
-downloaded embedding model, and no LLM API key required. 132 tests currently
-pass (14 rate-limiter, 10 gateway, 44 scheduler, 13 worker-pool, 51
+downloaded embedding model, and no LLM API key required. 157 tests currently
+pass (17 rate-limiter, 10 gateway, 48 scheduler, 13 worker-pool, 69
 agent-ops), including a rate-limiter concurrency test that fires 50 parallel
 requests at a bucket of capacity 10 and asserts exactly 10 are allowed, a
 scheduler test that dispatches a 5-job DAG with mixed priorities and asserts
 the exact dispatch order, an agent-ops test that runs 10 sample debugging
 questions through retrieval and checks each one is grounded in the right
-runbook section, and an agent-ops test that mocks a transient connection
-error with `respx` and asserts the Scheduler tool call is retried and
-succeeds rather than failing the whole request.
+runbook section, an agent-ops test that mocks a transient connection error
+with `respx` and asserts the Scheduler tool call is retried and succeeds
+rather than failing the whole request, and an agent-ops end-to-end test that
+routes 15 mixed schedule/debug/monitor/ambiguous queries and asserts 100%
+reach the correct specialist.
 
 `services/agent_ops/requirements.txt` pulls in `sentence-transformers`
 (for the self-hosted embedding + reranking models) and `torch` as a
@@ -187,6 +200,10 @@ refill 5/sec) and a `premium` tier on Sliding Window (limit 200 per 60s).
 (falls back to the caller's IP). Denied requests get `429` with a
 `Retry-After` header; an unreachable backend returns `503`.
 
+`GET /v1/rate-limit/status?client_id=acme&tier=default` (added in Milestone
+5, for the Monitor Agent) reports current remaining/limit without spending a
+request — a read-only peek, not a check.
+
 ## API reference (Milestone 2)
 
 **Scheduler** — `POST /v1/jobs` submits a batch of jobs sharing one DAG. Each
@@ -212,6 +229,10 @@ been dispatched yet (`PENDING`/`READY`/`RETRY`); once a worker may already
 be running it, cancellation is refused with `409` rather than racing the
 Worker Pool. `PATCH /v1/jobs/{id}/status` is how the Worker Pool reports
 progress — the Scheduler is the only service that touches Postgres.
+
+`GET /v1/jobs/stats` (added in Milestone 5, for the Monitor Agent) returns
+job counts per status, e.g. `{"counts": {"PENDING": 3, "DLQ": 1}}` — queue
+depth without fetching every job record.
 
 **Worker Pool** — has no public job API; it pulls from the Scheduler's Redis
 dispatch queue and calls back into the Scheduler's `PATCH` endpoint. `GET
@@ -279,6 +300,42 @@ explains why instead of the request failing with a 500.
 This endpoint needs the same LLM key as Milestone 3's `/v1/debug/ask`
 (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) — one call decides *whether* to
 call a tool and *which* tool, via the provider's native function-calling.
+
+## API reference (Milestone 5)
+
+**Agent Ops** — `POST /v1/agent/ask` is the unified entry point: one call
+classifies intent (`schedule` / `debug` / `monitor` / `ambiguous`) and
+routes to whichever specialist applies.
+
+```json
+{"question": "why is the gateway returning 503?"}
+```
+
+routes to the same debug/RAG graph `/v1/debug/ask` uses and returns
+`{"response": "...", "result": null, ...}`; a scheduling request routes to
+the same Scheduler Agent `/v1/agent/schedule` uses (destructive tools still
+return `needs_confirmation`); a monitoring request
+
+```json
+{"question": "what's client acme's current rate limit usage?"}
+```
+
+routes to the Monitor Agent and returns queue depth and/or rate-limit status
+in `result`. A request that doesn't clearly fit any category gets a
+clarifying question back instead of a guess:
+
+```json
+{"response": "I'm not sure whether you want to schedule something, debug an issue, or check system status -- could you clarify?"}
+```
+
+`GET /v1/monitor/status?client_id=acme&tier=default` reaches the Monitor
+Agent directly, with **no LLM call** — `client_id` is optional (omit it to
+get queue depth only). Useful for a dashboard or health check that
+shouldn't depend on LLM availability/latency to render.
+
+`/v1/debug/ask` and `/v1/agent/schedule` from Milestones 3/4 keep working
+unchanged, for callers that already know which specialist they want and
+would rather skip the classification call.
 
 ## Design decisions
 
@@ -375,6 +432,31 @@ call a tool and *which* tool, via the provider's native function-calling.
   `httpx.TransportError` (connection reset, DNS blip) covers the common
   transient case without turning a genuinely-down Scheduler into a long hang
   for whoever's waiting on the agent's HTTP response.
+- **The orchestrator routes into existing graphs; it doesn't reimplement
+  them.** `run_scheduler_agent`/`run_debug_agent` in `app/orchestrator.py`
+  call the exact same compiled graphs `/v1/agent/schedule` and
+  `/v1/debug/ask` use, via a plain `ainvoke()` — a routing node calling a
+  sub-graph as a function, not nested `StateGraph` composition. Simpler, and
+  the two graphs' state schemas never had to be unified into one.
+- **Monitor Agent needs no tool-calling LLM of its own.** Unlike the
+  Scheduler Agent, there's no ambiguity in *which* tool to run once intent
+  is `monitor` — queue depth is always fetched, and rate-limit status is
+  fetched if (and only if) `classify_intent` extracted a `client_id`. One
+  structured-output call (classification + entity extraction together)
+  covers it; a second LLM round-trip would just add latency for no
+  additional decision being made.
+- **`classify_intent`'s extraction is one-shot, with no self-correction
+  loop.** If it mis-extracts a `client_id` from an ambiguous request, the
+  Monitor Agent just reports whatever it extracted rather than asking a
+  follow-up question -- see the Known Limitation in ROADMAP.md Milestone 5.
+  A `clarify`-and-retry loop here would mirror Milestone 4's confirmation
+  gate, but queue-depth-only monitoring (no client_id) never needs it, so
+  it's deferred rather than speculatively built.
+- **`GET /v1/rate-limit/status` reuses `check()` at `cost=0`, not a new Lua
+  script.** Both algorithms' scripts are no-ops (or a same-value rewrite) at
+  `cost=0` -- confirmed by `test_status_does_not_consume_a_token` -- so a
+  second read-only script would have been duplicated logic for no behavioral
+  difference.
 
 ## Repository layout
 
@@ -390,7 +472,7 @@ AgentOps/
 │   ├── service_registry/  Not started (Milestone 1 uses a static routing table)
 │   ├── scheduler/         Milestone 2 (complete)
 │   ├── worker_pool/       Milestone 2 (complete)
-│   └── agent_ops/         Milestone 4 (complete); multi-agent routing from Milestone 5
+│   └── agent_ops/         Milestone 5 (complete); observability/guardrails from Milestone 6
 ├── scripts/
 │   ├── loadtest/          Locust load-test scripts
 │   └── dev/               Local dev/test helper scripts (test_all.sh / .ps1)
@@ -426,6 +508,5 @@ continued development.
 
 See [ROADMAP.md](ROADMAP.md) for the full milestone breakdown and current status.
 Milestones 1 (Rate Limiter + API Gateway), 2 (Task Scheduler + Worker Pool),
-3 (RAG Q&A), and 4 (Tool-Calling) are implemented and tested; multi-agent
-routing (Milestone 5) and observability/guardrails (Milestone 6) are not
-started yet.
+3 (RAG Q&A), 4 (Tool-Calling), and 5 (Multi-Agent Routing) are implemented
+and tested; observability/guardrails (Milestone 6) is not started yet.

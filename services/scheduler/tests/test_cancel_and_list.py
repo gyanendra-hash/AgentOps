@@ -51,3 +51,20 @@ async def test_cancel_dispatched_job_is_refused(scheduler):
 
 async def test_cancel_unknown_job_returns_none(scheduler):
     assert await scheduler.cancel_job("does-not-exist") is None
+
+
+async def test_queue_depth_counts_by_status(scheduler):
+    records = await scheduler.submit_batch(
+        [NewJob(ref="a", name="a"), NewJob(ref="b", name="b"), NewJob(ref="c", name="c")]
+    )
+    await scheduler.update_status(records["a"].id, JobStatus.DLQ, error="boom")
+    await scheduler.update_status(records["b"].id, JobStatus.DLQ, error="boom")
+
+    depth = await scheduler.queue_depth()
+
+    assert depth[JobStatus.DLQ] == 2
+    assert depth[JobStatus.PENDING] == 1
+
+
+async def test_queue_depth_empty_when_no_jobs(scheduler):
+    assert await scheduler.queue_depth() == {}

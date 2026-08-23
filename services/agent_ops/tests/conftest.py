@@ -3,16 +3,19 @@ import httpx
 import pytest_asyncio
 
 from app.pending_actions import PendingActionStore
+from app.rate_limiter_client import RateLimiterClient
 from app.scheduler_client import SchedulerClient
 from tests.fakes import (
     FakeAnswerGenerator,
     FakeEmbeddingProvider,
+    FakeIntentClassifier,
     FakeReranker,
     FakeToolCallingLLM,
     InMemoryEmbeddingRepository,
 )
 
 SCHEDULER_BASE_URL = "http://scheduler.test"
+RATE_LIMITER_BASE_URL = "http://rate-limiter.test"
 
 
 @pytest_asyncio.fixture
@@ -56,3 +59,14 @@ async def pending_actions(redis_client):
 @pytest_asyncio.fixture
 async def tool_llm():
     return FakeToolCallingLLM()
+
+
+@pytest_asyncio.fixture
+async def rate_limiter_client():
+    async with httpx.AsyncClient() as http_client:
+        yield RateLimiterClient(http_client, RATE_LIMITER_BASE_URL)
+
+
+@pytest_asyncio.fixture
+async def intent_classifier():
+    return FakeIntentClassifier()

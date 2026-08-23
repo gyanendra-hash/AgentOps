@@ -96,6 +96,7 @@ services:
       DATABASE_URL: postgresql://agentops:agentops@postgres:5432/agentops
       REDIS_URL: redis://redis:6379/0
       SCHEDULER_URL: http://scheduler:8002
+      RATE_LIMITER_URL: http://rate-limiter:8001
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -108,4 +109,6 @@ services:
       redis:
         condition: service_healthy
       scheduler:
+        condition: service_started
+      rate-limiter:
         condition: service_started
