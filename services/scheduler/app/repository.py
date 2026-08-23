@@ -7,6 +7,19 @@ from typing import Protocol
 from agentops_common.models import JobStatus
 
 
+#: Statuses a job can still be cancelled from -- once DISPATCHED, a worker
+#: may already be executing it, so cancellation is refused rather than
+#: racing the Worker Pool.
+CANCELLABLE_STATUSES = {JobStatus.PENDING, JobStatus.READY, JobStatus.RETRY}
+
+
+class JobNotCancellableError(Exception):
+    def __init__(self, job_id: str, status: JobStatus) -> None:
+        self.job_id = job_id
+        self.status = status
+        super().__init__(f"job {job_id} cannot be cancelled from status {status.value}")
+
+
 @dataclass
 class JobRecord:
     id: str
@@ -57,3 +70,13 @@ class JobRepository(Protocol):
         error: str | None = None,
         increment_attempt: bool = False,
     ) -> JobRecord | None: ...
+
+    async def list_by_status(self, status: JobStatus | None) -> list[JobRecord]:
+        """All jobs, or all jobs in `status` if given. Newest first."""
+        ...
+
+    async def cancel(self, job_id: str) -> JobRecord | None:
+        """None if `job_id` doesn't exist. Raises JobNotCancellableError if
+        it exists but isn't in a cancellable status (see
+        CANCELLABLE_STATUSES) -- otherwise transitions it to CANCELLED."""
+        ...

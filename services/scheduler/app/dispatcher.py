@@ -68,6 +68,12 @@ class Scheduler:
             job_id, status, error=error, increment_attempt=increment_attempt
         )
 
+    async def list_jobs(self, status: JobStatus | None = None) -> list[JobRecord]:
+        return await self.repository.list_by_status(status)
+
+    async def cancel_job(self, job_id: str) -> JobRecord | None:
+        return await self.repository.cancel(job_id)
+
     async def refresh_ready_jobs(self) -> int:
         candidate_ids = await self.repository.find_ready_candidates()
         if not candidate_ids:

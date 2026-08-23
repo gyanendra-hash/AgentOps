@@ -94,6 +94,8 @@ services:
       dockerfile: services/agent_ops/Dockerfile
     environment:
       DATABASE_URL: postgresql://agentops:agentops@postgres:5432/agentops
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_URL: http://scheduler:8002
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -103,3 +105,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      scheduler:
+        condition: service_started

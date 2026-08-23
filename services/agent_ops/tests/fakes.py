@@ -100,3 +100,21 @@ class FakeAnswerGenerator:
         if not context_chunks:
             return "I don't have enough information to answer that."
         return f"Based on the runbook: {context_chunks[0]}"
+
+
+class FakeToolCallingLLM:
+    """Stands in for a real LLM's tool-calling decision. Tests preprogram
+    question -> ToolDecision so the *routing/execution* plumbing (which is
+    what ROADMAP 4.3-4.5 actually specify) is verified without needing a
+    real LLM call to parse natural language."""
+
+    def __init__(self, decisions: dict | None = None, default=None) -> None:
+        from app.tool_llm import ToolDecision
+
+        self.decisions = decisions or {}
+        self.default = default or ToolDecision(tool_name=None, rationale="no matching tool")
+        self.calls: list[str] = []
+
+    async def decide(self, question: str, tools: list) -> "ToolDecision":  # noqa: F821
+        self.calls.append(question)
+        return self.decisions.get(question, self.default)

@@ -9,6 +9,7 @@ from agentops_common.models import (
     JobBatchRequest,
     JobBatchResponse,
     JobResponse,
+    JobStatus,
     JobStatusUpdateRequest,
 )
 from app.config import get_settings
@@ -17,7 +18,7 @@ from app.db import create_pool, run_migrations
 from app.dispatcher import DuplicateRefError, Scheduler, UnknownDependencyError
 from app.leader_election import LeaderElection
 from app.postgres_repository import PostgresJobRepository
-from app.repository import JobRecord
+from app.repository import JobNotCancellableError, JobRecord
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
@@ -86,6 +87,25 @@ async def submit_jobs(payload: JobBatchRequest, request: Request) -> JobBatchRes
 async def get_job(job_id: str, request: Request) -> JobResponse:
     scheduler: Scheduler = request.app.state.scheduler
     record = await scheduler.get_job(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return _to_response(record)
+
+
+@app.get("/v1/jobs", response_model=JobBatchResponse)
+async def list_jobs(request: Request, status: JobStatus | None = None) -> JobBatchResponse:
+    scheduler: Scheduler = request.app.state.scheduler
+    records = await scheduler.list_jobs(status)
+    return JobBatchResponse(jobs=[_to_response(r) for r in records])
+
+
+@app.post("/v1/jobs/{job_id}/cancel", response_model=JobResponse)
+async def cancel_job(job_id: str, request: Request) -> JobResponse:
+    scheduler: Scheduler = request.app.state.scheduler
+    try:
+        record = await scheduler.cancel_job(job_id)
+    except JobNotCancellableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if record is None:
         raise HTTPException(status_code=404, detail="job not found")
     return _to_response(record)

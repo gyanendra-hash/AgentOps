@@ -123,3 +123,48 @@ async def test_patch_unknown_job_returns_404():
         )
 
     assert response.status_code == 404
+
+
+async def test_list_jobs_filters_by_status_query_param():
+    async with await _client() as client:
+        await client.post("/v1/jobs", json={"jobs": [{"ref": "a", "name": "a"}]})
+        submit_response = await client.post("/v1/jobs", json={"jobs": [{"ref": "b", "name": "b"}]})
+        job_id = submit_response.json()["jobs"][0]["id"]
+        await client.patch(f"/v1/jobs/{job_id}/status", json={"status": "DLQ", "error": "boom"})
+
+        all_response = await client.get("/v1/jobs")
+        dlq_response = await client.get("/v1/jobs", params={"status": "DLQ"})
+
+    assert len(all_response.json()["jobs"]) == 2
+    dlq_jobs = dlq_response.json()["jobs"]
+    assert len(dlq_jobs) == 1
+    assert dlq_jobs[0]["id"] == job_id
+
+
+async def test_cancel_job_endpoint_succeeds_for_pending_job():
+    async with await _client() as client:
+        submit_response = await client.post("/v1/jobs", json={"jobs": [{"ref": "a", "name": "a"}]})
+        job_id = submit_response.json()["jobs"][0]["id"]
+
+        cancel_response = await client.post(f"/v1/jobs/{job_id}/cancel")
+
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "CANCELLED"
+
+
+async def test_cancel_job_endpoint_returns_409_when_already_dispatched():
+    async with await _client() as client:
+        submit_response = await client.post("/v1/jobs", json={"jobs": [{"ref": "a", "name": "a"}]})
+        job_id = submit_response.json()["jobs"][0]["id"]
+        await client.patch(f"/v1/jobs/{job_id}/status", json={"status": "DISPATCHED"})
+
+        cancel_response = await client.post(f"/v1/jobs/{job_id}/cancel")
+
+    assert cancel_response.status_code == 409
+
+
+async def test_cancel_job_endpoint_returns_404_for_unknown_job():
+    async with await _client() as client:
+        response = await client.post("/v1/jobs/does-not-exist/cancel")
+
+    assert response.status_code == 404

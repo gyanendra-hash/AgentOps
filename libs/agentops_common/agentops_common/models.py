@@ -28,6 +28,7 @@ class JobStatus(str, Enum):
     RETRY = "RETRY"
     FAILED = "FAILED"
     DLQ = "DLQ"
+    CANCELLED = "CANCELLED"
 
 
 class NewJob(BaseModel):

@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from agentops_common.models import JobStatus
-from app.repository import JobRecord
+from app.repository import CANCELLABLE_STATUSES, JobNotCancellableError, JobRecord
 
 
 class InMemoryJobRepository:
@@ -80,5 +80,21 @@ class InMemoryJobRepository:
         record.error = error
         if increment_attempt:
             record.attempt += 1
+        record.updated_at = datetime.now(timezone.utc)
+        return record
+
+    async def list_by_status(self, status: JobStatus | None) -> list[JobRecord]:
+        records = list(self._jobs.values())
+        if status is not None:
+            records = [r for r in records if r.status == status]
+        return sorted(records, key=lambda r: r.created_at, reverse=True)
+
+    async def cancel(self, job_id: str) -> JobRecord | None:
+        record = self._jobs.get(job_id)
+        if record is None:
+            return None
+        if record.status not in CANCELLABLE_STATUSES:
+            raise JobNotCancellableError(job_id, record.status)
+        record.status = JobStatus.CANCELLED
         record.updated_at = datetime.now(timezone.utc)
         return record

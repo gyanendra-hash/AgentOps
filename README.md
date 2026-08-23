@@ -18,6 +18,7 @@ per-milestone checklists live in [ROADMAP.md](ROADMAP.md).
 - [API reference (Milestone 1)](#api-reference-milestone-1)
 - [API reference (Milestone 2)](#api-reference-milestone-2)
 - [API reference (Milestone 3)](#api-reference-milestone-3)
+- [API reference (Milestone 4)](#api-reference-milestone-4)
 - [Design decisions](#design-decisions)
 - [Repository layout](#repository-layout)
 - [Branches](#branches)
@@ -43,7 +44,7 @@ Six independently deployable services, each owning its own data:
 | [`services/service_registry`](services/service_registry) | Track healthy service instances | Redis (TTL keys) | Not started — Milestone 1 ships with a static routing table instead |
 | [`services/scheduler`](services/scheduler) | Priority + dependency-aware job dispatch, leader election | PostgreSQL, Redis | Milestone 2 |
 | [`services/worker_pool`](services/worker_pool) | Execute jobs, retry, DLQ | Redis (calls Scheduler API for job state) | Milestone 2 |
-| [`services/agent_ops`](services/agent_ops) | RAG-grounded debugging today; routing + tool-calling from Milestone 4 | PostgreSQL + pgvector | Milestone 3 |
+| [`services/agent_ops`](services/agent_ops) | RAG-grounded debugging + Scheduler tool-calling; multi-agent routing from Milestone 5 | PostgreSQL + pgvector, Redis | Milestone 4 |
 
 Shared code (Pydantic models, Redis helpers) lives in
 [`libs/agentops_common`](libs/agentops_common), imported by every service as an
@@ -91,6 +92,24 @@ curl -s -X POST http://localhost:8004/v1/debug/ask \
   -d '{"question": "the dead letter queue is growing fast, what should I check?"}'
 ```
 
+Ask it to act on the Scheduler instead of just answering — non-destructive
+tools run immediately, `cancel_job` asks for confirmation first:
+
+```bash
+curl -s -X POST http://localhost:8004/v1/agent/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"question": "create a job called nightly-etl with priority 5"}'
+
+curl -s -X POST http://localhost:8004/v1/agent/schedule \
+  -H "Content-Type: application/json" \
+  -d '{"question": "cancel job <job-id>"}'
+# -> {"needs_confirmation": true, "confirmation_token": "...", ...}
+
+curl -s -X POST http://localhost:8004/v1/agent/confirm \
+  -H "Content-Type: application/json" \
+  -d '{"confirmation_token": "<token from above>", "confirmed": true}'
+```
+
 ## Local development (without Docker)
 
 Each service is a standalone FastAPI app with its own `requirements.txt`. From a
@@ -120,16 +139,18 @@ PYTHONPATH=. pytest -v
 ```
 
 All five services' tests run fully in-process against
-[`fakeredis`](https://github.com/cunla/fakeredis-py), `respx`, and in-memory
-fakes of the Postgres/pgvector repositories — no Docker, no downloaded
-embedding model, and no LLM API key required. 97 tests currently pass (14
-rate-limiter, 10 gateway, 34 scheduler, 13 worker-pool, 26 agent-ops),
-including a rate-limiter concurrency test that fires 50 parallel requests at
-a bucket of capacity 10 and asserts exactly 10 are allowed, a scheduler test
-that dispatches a 5-job DAG with mixed priorities and asserts the exact
-dispatch order, and an agent-ops test that runs 10 sample debugging
+[`fakeredis`](https://github.com/cunla/fakeredis-py), [`respx`](https://github.com/lundberg/respx),
+and in-memory fakes of the Postgres/pgvector repositories — no Docker, no
+downloaded embedding model, and no LLM API key required. 132 tests currently
+pass (14 rate-limiter, 10 gateway, 44 scheduler, 13 worker-pool, 51
+agent-ops), including a rate-limiter concurrency test that fires 50 parallel
+requests at a bucket of capacity 10 and asserts exactly 10 are allowed, a
+scheduler test that dispatches a 5-job DAG with mixed priorities and asserts
+the exact dispatch order, an agent-ops test that runs 10 sample debugging
 questions through retrieval and checks each one is grounded in the right
-runbook section.
+runbook section, and an agent-ops test that mocks a transient connection
+error with `respx` and asserts the Scheduler tool call is retried and
+succeeds rather than failing the whole request.
 
 `services/agent_ops/requirements.txt` pulls in `sentence-transformers`
 (for the self-hosted embedding + reranking models) and `torch` as a
@@ -184,8 +205,12 @@ id yet:
 
 A batch whose dependencies form a cycle is rejected whole with `422` before
 anything is written. `GET /v1/jobs/{id}` returns current status
-(`PENDING → READY → DISPATCHED → RUNNING → SUCCEEDED`, or `RETRY`/`DLQ` on
-failure). `PATCH /v1/jobs/{id}/status` is how the Worker Pool reports
+(`PENDING → READY → DISPATCHED → RUNNING → SUCCEEDED`, or `RETRY`/`DLQ`/`CANCELLED`
+on failure/cancellation). `GET /v1/jobs?status=DLQ` lists jobs, optionally
+filtered by status. `POST /v1/jobs/{id}/cancel` cancels a job that hasn't
+been dispatched yet (`PENDING`/`READY`/`RETRY`); once a worker may already
+be running it, cancellation is refused with `409` rather than racing the
+Worker Pool. `PATCH /v1/jobs/{id}/status` is how the Worker Pool reports
 progress — the Scheduler is the only service that touches Postgres.
 
 **Worker Pool** — has no public job API; it pulls from the Scheduler's Redis
@@ -221,6 +246,39 @@ This endpoint needs a real LLM key to answer for real —
 `LLM_PROVIDER=anthropic`. Embeddings default to the self-hosted
 `bge-small-en` (`EMBEDDING_PROVIDER=local`, no key needed); switch to
 `EMBEDDING_PROVIDER=openai` for `text-embedding-3-small` instead.
+
+## API reference (Milestone 4)
+
+**Agent Ops** — `POST /v1/agent/schedule` decides which Scheduler tool (if
+any) applies to a natural-language request and either runs it or asks for
+confirmation:
+
+```json
+{"question": "create a job called nightly-etl with priority 5"}
+```
+
+```json
+{"response": "Ran `create_job` successfully. Result: {...}", "needs_confirmation": false, "confirmation_token": null, "result": {"id": "...", "name": "nightly-etl", ...}}
+```
+
+Four tools: `create_job`, `get_job_status`, `list_failed_jobs` (all
+non-destructive, run immediately) and `cancel_job` (destructive — returns
+`needs_confirmation: true` and a `confirmation_token` instead of executing):
+
+```json
+{"response": "About to run `cancel_job` (...) with arguments {\"job_id\": \"...\"}. Confirm?", "needs_confirmation": true, "confirmation_token": "8f1e...", "result": null}
+```
+
+`POST /v1/agent/confirm {"confirmation_token": "...", "confirmed": true}`
+redeems it and actually cancels the job; `"confirmed": false` (or letting
+the token expire after `CONFIRMATION_TTL_SECONDS`, default 300s) discards it
+with no effect. If no tool matches the request, or a tool call fails
+(unknown job id, job already dispatched, Scheduler unreachable), `response`
+explains why instead of the request failing with a 500.
+
+This endpoint needs the same LLM key as Milestone 3's `/v1/debug/ask`
+(`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) — one call decides *whether* to
+call a tool and *which* tool, via the provider's native function-calling.
 
 ## Design decisions
 
@@ -294,6 +352,29 @@ This endpoint needs a real LLM key to answer for real —
   justify until intent classification exists (Milestone 5) — `answer_question`
   in `app/graph.py` is written to become the `debug_agent` node in that
   larger graph, not to be rewritten from scratch.
+- **Confirmation is a second HTTP request, not a paused graph.** A LangGraph
+  run completes within one request; there's no in-process way to "wait" for
+  a human across requests. `clarify` instead parks the decision in Redis
+  under a token and ends the graph — `POST /v1/agent/confirm` is a
+  completely separate invocation that redeems it. This is the same shape
+  production agent APIs generally use for human-in-the-loop steps.
+- **Tools wrap REST endpoints; they never touch Postgres.** Per SRS 6.5.4
+  ("the agent never re-implements scheduling logic"), `list_failed_jobs` and
+  `cancel_job` needed two new Scheduler endpoints (`GET /v1/jobs`,
+  `POST /v1/jobs/{id}/cancel`) rather than having Agent Ops query the jobs
+  table directly — the Scheduler stays the only service that owns job state.
+- **The LLM's tool-call decision is the one thing tests can't verify for
+  real.** `ToolCallingLLM` is a `Protocol` like `AnswerGenerator`; tests
+  preprogram `FakeToolCallingLLM` with the decision a real LLM *would*
+  plausibly return for a given request, then verify everything downstream —
+  argument validation, tool dispatch, the confirmation gate, retry-on-failure
+  — actually behaves correctly. Whether the LLM parses a given sentence into
+  the *right* tool call is a prompt/model quality question, not a plumbing
+  one, and needs a real API key to evaluate.
+- **`SchedulerClient` retries once, not indefinitely.** A single retry on
+  `httpx.TransportError` (connection reset, DNS blip) covers the common
+  transient case without turning a genuinely-down Scheduler into a long hang
+  for whoever's waiting on the agent's HTTP response.
 
 ## Repository layout
 
@@ -309,7 +390,7 @@ AgentOps/
 │   ├── service_registry/  Not started (Milestone 1 uses a static routing table)
 │   ├── scheduler/         Milestone 2 (complete)
 │   ├── worker_pool/       Milestone 2 (complete)
-│   └── agent_ops/         Milestone 3 (complete); routing/tool-calling from Milestone 4
+│   └── agent_ops/         Milestone 4 (complete); multi-agent routing from Milestone 5
 ├── scripts/
 │   ├── loadtest/          Locust load-test scripts
 │   └── dev/               Local dev/test helper scripts (test_all.sh / .ps1)
@@ -345,5 +426,6 @@ continued development.
 
 See [ROADMAP.md](ROADMAP.md) for the full milestone breakdown and current status.
 Milestones 1 (Rate Limiter + API Gateway), 2 (Task Scheduler + Worker Pool),
-and 3 (RAG Q&A) are implemented and tested; later milestones (tool-calling,
-multi-agent routing, observability) are not started yet.
+3 (RAG Q&A), and 4 (Tool-Calling) are implemented and tested; multi-agent
+routing (Milestone 5) and observability/guardrails (Milestone 6) are not
+started yet.

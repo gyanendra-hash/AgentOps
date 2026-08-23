@@ -6,7 +6,7 @@ import uuid
 import asyncpg
 
 from agentops_common.models import JobStatus
-from app.repository import JobRecord
+from app.repository import CANCELLABLE_STATUSES, JobNotCancellableError, JobRecord
 
 _GET_QUERY = """
     SELECT j.id, j.name, j.status, j.priority, j.attempt, j.max_retries,
@@ -132,4 +132,39 @@ class PostgresJobRepository:
         """
         async with self._pool.acquire() as conn:
             await conn.execute(query, job_id, status.value, error, increment)
+        return await self.get(job_id)
+
+    async def list_by_status(self, status: JobStatus | None) -> list[JobRecord]:
+        if status is None:
+            query = "SELECT id FROM jobs ORDER BY created_at DESC"
+            args: tuple = ()
+        else:
+            query = "SELECT id FROM jobs WHERE status = $1 ORDER BY created_at DESC"
+            args = (status.value,)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *args)
+        records = await asyncio.gather(*(self.get(str(row["id"])) for row in rows))
+        return [record for record in records if record is not None]
+
+    async def cancel(self, job_id: str) -> JobRecord | None:
+        record = await self.get(job_id)
+        if record is None:
+            return None
+        if record.status not in CANCELLABLE_STATUSES:
+            raise JobNotCancellableError(job_id, record.status)
+
+        query = """
+            UPDATE jobs SET status = 'CANCELLED', updated_at = now()
+            WHERE id = $1::uuid AND status = ANY($2::text[])
+        """
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                query, job_id, [s.value for s in CANCELLABLE_STATUSES]
+            )
+        if not result.endswith(" 1"):
+            # lost a race with another cancel/dispatch between the read above
+            # and this write -- re-fetch and report the status honestly
+            record = await self.get(job_id)
+            raise JobNotCancellableError(job_id, record.status if record else JobStatus.CANCELLED)
         return await self.get(job_id)

@@ -78,14 +78,34 @@ above `RAG_MIN_SCORE`. Multi-intent routing is Milestone 5.
 
 ## Milestone 4 — Agentic AI: Tool-Calling
 
-- [ ] 4.1 — Pydantic tool schemas (`create_job`, `cancel_job`, `get_job_status`, `list_failed_jobs`)
-- [ ] 4.2 — Tool functions wrapping Gateway/Scheduler REST endpoints
-- [ ] 4.3 — Scheduler Agent node in LangGraph
-- [ ] 4.4 — NL request correctly calls `create_job` with right arguments
-- [ ] 4.5 — Confirmation guardrail for destructive tools via a clarify node
-- [ ] 4.6 — Bug-fix pass: malformed args, API timeouts, retry-on-tool-failure
+- [x] 4.1 — Pydantic tool schemas (`create_job`, `cancel_job`, `get_job_status`, `list_failed_jobs`) — `services/agent_ops/app/tools.py`
+- [x] 4.2 — Tool functions wrapping Scheduler REST endpoints — `services/agent_ops/app/scheduler_client.py`. Two new Scheduler endpoints (`GET /v1/jobs`, `POST /v1/jobs/{id}/cancel`) were added so `list_failed_jobs`/`cancel_job` wrap something real instead of being faked
+- [x] 4.3 — Scheduler Agent node in LangGraph — `services/agent_ops/app/scheduler_agent.py`, the first *branching* graph in the repo (`decide_tool -> clarify | execute_tool -> respond`)
+- [x] 4.4 — NL request correctly calls `create_job` with right arguments (`test_nl_request_calls_create_job_with_right_arguments`)
+- [x] 4.5 — Confirmation guardrail for destructive tools via a `clarify` node (`test_destructive_tool_requires_confirmation_and_does_not_execute`, `test_confirming_a_pending_cancel_executes_it`)
+- [x] 4.6 — Bug-fix pass: malformed args (`InvalidToolArgsError` → friendly message, not a crash), API timeouts/connection errors (`SchedulerClient` retries once, then a friendly "scheduler unavailable" message), retry-on-tool-failure (`test_transient_failure_is_retried_once`)
 
-**Status: not started.**
+**Status: complete.** 132 tests passing (14 rate-limiter, 10 gateway, 44
+scheduler, 13 worker-pool, 51 agent-ops).
+
+**Deliverable:** `POST /v1/agent/schedule {"question": "..."}` decides which
+Scheduler tool applies (if any) and either runs it immediately
+(`create_job`, `get_job_status`, `list_failed_jobs`) or — for the one
+destructive tool, `cancel_job` — returns `needs_confirmation: true` with a
+`confirmation_token` instead of executing. `POST /v1/agent/confirm
+{"confirmation_token": "...", "confirmed": true}` redeems it. Tool-call
+decisions come from a real LLM's function-calling (`OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY`, same as Milestone 3); tests preprogram the decision via
+a fake so the routing/confirmation/retry plumbing is verified without an
+LLM call — see [services/agent_ops/tests](services/agent_ops/tests).
+
+**Known limitation carried into a later pass:** confirmation state lives in
+Redis with a TTL (`CONFIRMATION_TTL_SECONDS`, default 300s) rather than a
+durable store — an abandoned confirmation just expires, which is correct
+behavior, but a Redis flush mid-flow would silently drop a pending
+confirmation too. Acceptable for now since destructive actions require
+confirmation either way (silent execution isn't possible), but worth
+revisiting if confirmations need to survive a Redis restart.
 
 ## Milestone 5 — Multi-Agent Routing
 
