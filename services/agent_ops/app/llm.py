@@ -7,6 +7,8 @@ pipeline is verifiable without one."""
 
 from typing import Protocol
 
+from app.tracing import TokenUsage
+
 SYSTEM_PROMPT = (
     "You are an on-call assistant for the AgentOps platform. Answer the "
     "operator's question using ONLY the provided runbook context below. "
@@ -30,6 +32,7 @@ class OpenAIAnswerGenerator:
 
         self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
+        self.last_usage: TokenUsage | None = None
 
     async def generate(self, question: str, context_chunks: list[str]) -> str:
         response = await self._client.chat.completions.create(
@@ -39,6 +42,11 @@ class OpenAIAnswerGenerator:
                 {"role": "user", "content": _build_user_prompt(question, context_chunks)},
             ],
         )
+        if response.usage:
+            self.last_usage = TokenUsage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+            )
         return response.choices[0].message.content or ""
 
 
@@ -48,6 +56,7 @@ class AnthropicAnswerGenerator:
 
         self._client = AsyncAnthropic(api_key=api_key)
         self._model = model
+        self.last_usage: TokenUsage | None = None
 
     async def generate(self, question: str, context_chunks: list[str]) -> str:
         response = await self._client.messages.create(
@@ -56,4 +65,9 @@ class AnthropicAnswerGenerator:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": _build_user_prompt(question, context_chunks)}],
         )
+        if response.usage:
+            self.last_usage = TokenUsage(
+                prompt_tokens=response.usage.input_tokens,
+                completion_tokens=response.usage.output_tokens,
+            )
         return "".join(block.text for block in response.content if block.type == "text")

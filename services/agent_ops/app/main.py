@@ -23,6 +23,7 @@ from app.reranker import CrossEncoderReranker
 from app.scheduler_agent import build_scheduler_agent_graph, execute_confirmed_action
 from app.scheduler_client import SchedulerClient
 from app.tool_llm import AnthropicToolCallingLLM, OpenAIToolCallingLLM, ToolCallingLLM
+from app.tracing import LangfuseExporter, Tracer
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 RUNBOOK_PATH = Path(__file__).resolve().parent.parent / "runbook" / "runbook.md"
@@ -127,6 +128,9 @@ async def lifespan(app: FastAPI):
         rate_limiter_client,
         pending_actions,
     )
+    app.state.langfuse = LangfuseExporter(
+        settings.langfuse_public_key, settings.langfuse_secret_key, settings.langfuse_host
+    )
 
     yield
 
@@ -145,15 +149,24 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     sources: list[str]
+    trace: list[dict] = []
 
 
 @app.post("/v1/debug/ask", response_model=AskResponse)
 async def ask(payload: AskRequest, request: Request) -> AskResponse:
     graph = request.app.state.graph
+    tracer = Tracer()
     result = await graph.ainvoke(
-        {"question": payload.question, "retrieved_context": [], "sources": [], "answer": ""}
+        {
+            "question": payload.question,
+            "tracer": tracer,
+            "retrieved_context": [],
+            "sources": [],
+            "answer": "",
+        }
     )
-    return AskResponse(answer=result["answer"], sources=result["sources"])
+    request.app.state.langfuse.export("debug_ask", payload.question, tracer, result["answer"])
+    return AskResponse(answer=result["answer"], sources=result["sources"], trace=tracer.as_dicts())
 
 
 class AgentAskRequest(BaseModel):
@@ -165,6 +178,7 @@ class AgentAskResponse(BaseModel):
     needs_confirmation: bool = False
     confirmation_token: str | None = None
     result: Any = None
+    trace: list[dict] = []
 
 
 class AgentConfirmRequest(BaseModel):
@@ -172,6 +186,8 @@ class AgentConfirmRequest(BaseModel):
     confirmed: bool = True
 
 
+#: `tracer` deliberately excluded here -- every call site sets it explicitly
+#: (ordered *after* this spread) to the current request's Tracer instance.
 _SCHEDULER_AGENT_INITIAL_STATE = {
     "tool_name": None,
     "tool_args": {},
@@ -187,12 +203,17 @@ _SCHEDULER_AGENT_INITIAL_STATE = {
 @app.post("/v1/agent/schedule", response_model=AgentAskResponse)
 async def agent_schedule(payload: AgentAskRequest, request: Request) -> AgentAskResponse:
     graph = request.app.state.scheduler_agent_graph
-    result = await graph.ainvoke({"question": payload.question, **_SCHEDULER_AGENT_INITIAL_STATE})
+    tracer = Tracer()
+    result = await graph.ainvoke(
+        {"question": payload.question, **_SCHEDULER_AGENT_INITIAL_STATE, "tracer": tracer}
+    )
+    request.app.state.langfuse.export("agent_schedule", payload.question, tracer, result["response"])
     return AgentAskResponse(
         response=result["response"],
         needs_confirmation=result["needs_confirmation"],
         confirmation_token=result["confirmation_token"],
         result=result.get("result"),
+        trace=tracer.as_dicts(),
     )
 
 
@@ -217,12 +238,19 @@ async def agent_ask(payload: AgentAskRequest, request: Request) -> AgentAskRespo
     Agent. /v1/debug/ask and /v1/agent/schedule remain available for direct
     access when the caller already knows which specialist it wants."""
     graph = request.app.state.orchestrator_graph
-    result = await graph.ainvoke({"question": payload.question, **INITIAL_ORCHESTRATOR_STATE})
+    tracer = Tracer()
+    result = await graph.ainvoke(
+        {"question": payload.question, **INITIAL_ORCHESTRATOR_STATE, "tracer": tracer}
+    )
+    request.app.state.langfuse.export(
+        f"agent_ask:{result.get('intent')}", payload.question, tracer, result["response"]
+    )
     return AgentAskResponse(
         response=result["response"],
         needs_confirmation=result["needs_confirmation"],
         confirmation_token=result["confirmation_token"],
         result=result.get("result"),
+        trace=tracer.as_dicts(),
     )
 
 

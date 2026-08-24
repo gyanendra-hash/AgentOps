@@ -16,12 +16,15 @@ _KEY_PREFIX = "agentops:agent_ops:pending_action:"
 class PendingActionStore:
     def __init__(self, redis: Redis, ttl_seconds: float) -> None:
         self._redis = redis
-        self._ttl_seconds = ttl_seconds
+        # milliseconds, not whole seconds via `ex=` -- a sub-second
+        # ttl_seconds (as used in tests) would otherwise truncate to 0,
+        # which Redis treats as "already expired" instead of "never expires".
+        self._ttl_ms = max(1, int(ttl_seconds * 1000))
 
     async def create(self, tool_name: str, args: dict, question: str) -> str:
         token = str(uuid.uuid4())
         payload = json.dumps({"tool_name": tool_name, "args": args, "question": question})
-        await self._redis.set(f"{_KEY_PREFIX}{token}", payload, ex=int(self._ttl_seconds))
+        await self._redis.set(f"{_KEY_PREFIX}{token}", payload, px=self._ttl_ms)
         return token
 
     async def get(self, token: str) -> dict | None:

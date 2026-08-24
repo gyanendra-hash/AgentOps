@@ -4,8 +4,10 @@ Distributed API Gateway, Task Scheduler & Agentic AI Ops Layer.
 
 A microservice platform combining a Redis-backed rate limiter, an API gateway, a
 priority- and dependency-aware task scheduler, a worker pool, and a LangGraph-based
-agentic control plane that can schedule jobs, answer operational questions, and debug
-failures using RAG over system logs and runbooks.
+agentic control plane that classifies operator intent and routes it to a
+scheduling agent, a RAG-grounded debugging agent, or a monitoring agent —
+with per-node latency/token tracing and optional Langfuse export on every
+agent call.
 
 Full requirements and design live in [docs/SRS.md](docs/SRS.md). Build status and
 per-milestone checklists live in [ROADMAP.md](ROADMAP.md).
@@ -20,6 +22,7 @@ per-milestone checklists live in [ROADMAP.md](ROADMAP.md).
 - [API reference (Milestone 3)](#api-reference-milestone-3)
 - [API reference (Milestone 4)](#api-reference-milestone-4)
 - [API reference (Milestone 5)](#api-reference-milestone-5)
+- [Observability (Milestone 6)](#observability-milestone-6)
 - [Design decisions](#design-decisions)
 - [Repository layout](#repository-layout)
 - [Branches](#branches)
@@ -46,7 +49,7 @@ Six independently deployable services, each owning its own data:
 | [`services/service_registry`](services/service_registry) | Track healthy service instances | Redis (TTL keys) | Not started — Milestone 1 ships with a static routing table instead |
 | [`services/scheduler`](services/scheduler) | Priority + dependency-aware job dispatch, leader election | PostgreSQL, Redis | Milestone 2 |
 | [`services/worker_pool`](services/worker_pool) | Execute jobs, retry, DLQ | Redis (calls Scheduler API for job state) | Milestone 2 |
-| [`services/agent_ops`](services/agent_ops) | RAG debugging, Scheduler tool-calling, and intent-routed Monitor Agent | PostgreSQL + pgvector, Redis | Milestone 5 |
+| [`services/agent_ops`](services/agent_ops) | RAG debugging, Scheduler tool-calling, intent-routed Monitor Agent, per-node tracing | PostgreSQL + pgvector, Redis | Milestone 6 |
 
 Shared code (Pydantic models, Redis helpers) lives in
 [`libs/agentops_common`](libs/agentops_common), imported by every service as an
@@ -121,6 +124,21 @@ curl -s -X POST http://localhost:8004/v1/agent/ask \
   -d '{"question": "how'\''s the queue looking right now?"}'
 ```
 
+Every `/v1/agent/*` and `/v1/debug/ask` response includes a `trace` array —
+per-node latency and (for LLM-calling nodes) token usage, with no setup
+required. See [Observability (Milestone 6)](#observability-milestone-6).
+
+Or run the whole walkthrough above in one go:
+
+```bash
+scripts/dev/demo.sh              # bash
+scripts/dev/demo.ps1             # PowerShell
+
+# no LLM key configured yet? skip Milestones 3-5 instead of erroring:
+AGENT_OPS_HAS_LLM=0 scripts/dev/demo.sh
+scripts/dev/demo.ps1 -SkipLLM
+```
+
 ## Local development (without Docker)
 
 Each service is a standalone FastAPI app with its own `requirements.txt`. From a
@@ -152,8 +170,8 @@ PYTHONPATH=. pytest -v
 All five services' tests run fully in-process against
 [`fakeredis`](https://github.com/cunla/fakeredis-py), [`respx`](https://github.com/lundberg/respx),
 and in-memory fakes of the Postgres/pgvector repositories — no Docker, no
-downloaded embedding model, and no LLM API key required. 157 tests currently
-pass (17 rate-limiter, 10 gateway, 48 scheduler, 13 worker-pool, 69
+downloaded embedding model, and no LLM API key required. 174 tests currently
+pass (17 rate-limiter, 10 gateway, 48 scheduler, 13 worker-pool, 86
 agent-ops), including a rate-limiter concurrency test that fires 50 parallel
 requests at a bucket of capacity 10 and asserts exactly 10 are allowed, a
 scheduler test that dispatches a 5-job DAG with mixed priorities and asserts
@@ -161,9 +179,18 @@ the exact dispatch order, an agent-ops test that runs 10 sample debugging
 questions through retrieval and checks each one is grounded in the right
 runbook section, an agent-ops test that mocks a transient connection error
 with `respx` and asserts the Scheduler tool call is retried and succeeds
-rather than failing the whole request, and an agent-ops end-to-end test that
+rather than failing the whole request, an agent-ops end-to-end test that
 routes 15 mixed schedule/debug/monitor/ambiguous queries and asserts 100%
-reach the correct specialist.
+reach the correct specialist, and an agent-ops test that runs two graph
+invocations concurrently with separate tracers and asserts neither sees the
+other's spans (a regression test for a real bug caught while building
+Milestone 6 — see [Observability (Milestone 6)](#observability-milestone-6)).
+
+`services/agent_ops/scripts/run_eval.py` is the one script in this repo
+meant to make a real LLM call rather than run against a fake — it drives the
+20-query eval set (ROADMAP 6.3/6.4) through a live, configured
+`classify_intent` once `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is set, and
+prints routing accuracy plus any misclassified questions.
 
 `services/agent_ops/requirements.txt` pulls in `sentence-transformers`
 (for the self-hosted embedding + reranking models) and `torch` as a
@@ -337,6 +364,55 @@ shouldn't depend on LLM availability/latency to render.
 unchanged, for callers that already know which specialist they want and
 would rather skip the classification call.
 
+## Observability (Milestone 6)
+
+Every `/v1/debug/ask`, `/v1/agent/schedule`, and `/v1/agent/ask` response
+includes a `trace` array — no configuration needed:
+
+```json
+{
+  "trace": [
+    {"node": "retrieve", "latency_ms": 12.4, "usage": null},
+    {"node": "rerank", "latency_ms": 45.1, "usage": null},
+    {"node": "generate", "latency_ms": 812.7, "usage": {"prompt_tokens": 512, "completion_tokens": 84}}
+  ]
+}
+```
+
+Setting `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` (`LANGFUSE_HOST` too,
+for self-hosted Langfuse) additionally exports each request as a trace in
+[Langfuse](https://langfuse.com) with the same per-node spans and token
+usage — this is strictly additive; leaving them unset costs nothing, breaks
+nothing, and the `trace` field in the API response is unaffected either way.
+
+**Evaluation** — `services/agent_ops/eval/eval_set.py` has 20 questions
+covering all four intents plus a few genuinely ambiguous ones. Run it for
+real once an LLM key is configured:
+
+```bash
+cd services/agent_ops
+python scripts/run_eval.py
+```
+
+```
+Accuracy: 95% (19/20)
+
+Failures:
+  - 'what happened to job-1 yesterday': expected 'ambiguous', got 'schedule'
+```
+
+Doesn't need Postgres/Redis/the Scheduler/the Rate Limiter running — it
+calls `classify_intent` directly rather than executing whichever specialist
+it routes to, since ROADMAP 6.4 asks specifically for *routing* accuracy.
+`tests/test_eval.py` covers the harness itself (accuracy math, failure
+capture) against a fake classifier, the same way every other LLM boundary
+in this repo is tested.
+
+**Confirmation timeout** — a `cancel_job` confirmation
+(`CONFIRMATION_TTL_SECONDS`, default 300s) that's never confirmed or
+declined simply expires; redeeming an expired or unknown token returns "That
+confirmation has expired or was already used" rather than an error.
+
 ## Design decisions
 
 - **Atomicity via Lua, not read-modify-write.** Both algorithms run as a
@@ -457,6 +533,31 @@ would rather skip the classification call.
   `cost=0` -- confirmed by `test_status_does_not_consume_a_token` -- so a
   second read-only script would have been duplicated logic for no behavioral
   difference.
+- **A `Tracer` lives in graph *state*, never in a node closure.** Every
+  LangGraph here is compiled once at startup and reused across every
+  concurrent request; a tracer captured in a node's closure at build time
+  would silently accumulate every request's spans into one shared,
+  ever-growing list. Each node instead reads `state["tracer"]`, set fresh
+  per `ainvoke()` call -- this was a real bug caught while building
+  Milestone 6, not a hypothetical one; see
+  `test_concurrent_graph_invocations_get_isolated_traces`.
+- **Local trace collection is unconditional; Langfuse export is optional on
+  top of it.** `Tracer` always runs and is always returned in the API
+  response's `trace` field -- ROADMAP 6.2 doesn't depend on ROADMAP 6.1.
+  `LangfuseExporter` is a separate, additional destination for the same
+  data, a no-op unless `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY` are set.
+- **The eval script measures routing, not execution.** `run_eval` calls
+  `IntentClassifier.classify()` directly rather than invoking the full
+  orchestrator graph, so `scripts/run_eval.py` only needs an LLM key -- not
+  a running Scheduler/Rate-Limiter/Postgres/Redis -- to produce a
+  meaningful accuracy number, matching what ROADMAP 6.4 actually asks for.
+- **`PendingActionStore` sets Redis TTL in milliseconds (`PX`), not whole
+  seconds (`EX`).** Building the Milestone 6 test suite surfaced a real bug:
+  `EX` truncates any `ttl_seconds < 1` to `0`, which Redis treats as
+  "expire immediately" rather than "never expires" -- harmless at the
+  default 300s, but would have silently broken a short TTL used for
+  testing or a fast-confirmation deployment. Fixed and covered by
+  `test_confirmation_expires_after_ttl_elapses`.
 
 ## Repository layout
 
@@ -472,10 +573,10 @@ AgentOps/
 │   ├── service_registry/  Not started (Milestone 1 uses a static routing table)
 │   ├── scheduler/         Milestone 2 (complete)
 │   ├── worker_pool/       Milestone 2 (complete)
-│   └── agent_ops/         Milestone 5 (complete); observability/guardrails from Milestone 6
+│   └── agent_ops/         Milestone 6 (complete) -- every milestone done
 ├── scripts/
 │   ├── loadtest/          Locust load-test scripts
-│   └── dev/               Local dev/test helper scripts (test_all.sh / .ps1)
+│   └── dev/               Local dev/test helper scripts (test_all.sh / .ps1 / demo.sh / demo.ps1)
 ├── .env.example           Template for a local .env (copy before `docker compose up`)
 ├── docker-compose.yml     Redis, Postgres (+pgvector), and every service, wired together
 └── ROADMAP.md             Milestone-by-milestone status
@@ -486,7 +587,8 @@ internal shape: `app/` (FastAPI app + business logic), `tests/` (pytest,
 mocks only — no Docker required), `Dockerfile`, `requirements.txt` /
 `requirements-dev.txt`, and `pytest.ini`. `scheduler/` and `agent_ops/`
 additionally have a `migrations/` folder of raw SQL run at startup;
-`agent_ops/` also has `runbook/runbook.md`, the document it ingests for RAG.
+`agent_ops/` also has `runbook/runbook.md` (the document it ingests for RAG)
+and `eval/` + `scripts/run_eval.py` (the Milestone 6 evaluation set/runner).
 
 ## Branches
 
@@ -506,7 +608,10 @@ continued development.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full milestone breakdown and current status.
-Milestones 1 (Rate Limiter + API Gateway), 2 (Task Scheduler + Worker Pool),
-3 (RAG Q&A), 4 (Tool-Calling), and 5 (Multi-Agent Routing) are implemented
-and tested; observability/guardrails (Milestone 6) is not started yet.
+See [ROADMAP.md](ROADMAP.md) for the full milestone breakdown and current
+status. All six milestones — Rate Limiter + API Gateway, Task Scheduler +
+Worker Pool, RAG Q&A, Tool-Calling, Multi-Agent Routing, and Guardrails +
+Observability — are implemented and tested. 174 tests pass without any
+external dependency; `services/agent_ops/scripts/run_eval.py` is the one
+additional check that needs a real `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` to
+run.

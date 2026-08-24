@@ -15,8 +15,16 @@ from app.main import app
 from app.orchestrator import build_orchestrator_graph
 from app.scheduler_agent import build_scheduler_agent_graph
 from app.tool_llm import ToolDecision
+from app.tracing import LangfuseExporter
 from tests.conftest import RATE_LIMITER_BASE_URL, SCHEDULER_BASE_URL
 from tests.fakes import FakeIntentClassifier, FakeToolCallingLLM
+
+
+@pytest.fixture(autouse=True)
+def _langfuse():
+    # unconfigured -> no-op exporter, same as a real deployment without
+    # LANGFUSE_PUBLIC_KEY/SECRET_KEY set
+    app.state.langfuse = LangfuseExporter(None, None)
 
 
 @pytest.fixture(autouse=True)

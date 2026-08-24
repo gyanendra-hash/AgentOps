@@ -11,6 +11,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
+from app.tracing import TokenUsage
+
 Intent = Literal["schedule", "debug", "monitor", "ambiguous"]
 
 # ROADMAP 5.6: few-shot examples, added after misclassification during
@@ -74,6 +76,7 @@ class OpenAIIntentClassifier:
 
         self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
+        self.last_usage: TokenUsage | None = None
 
     async def classify(self, question: str) -> IntentClassification:
         response = await self._client.chat.completions.create(
@@ -94,6 +97,12 @@ class OpenAIIntentClassifier:
             ],
             tool_choice={"type": "function", "function": {"name": "classify_intent"}},
         )
+        if response.usage:
+            self.last_usage = TokenUsage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+            )
+
         message = response.choices[0].message
         if not message.tool_calls:
             return IntentClassification(intent="ambiguous")
@@ -106,6 +115,7 @@ class AnthropicIntentClassifier:
 
         self._client = AsyncAnthropic(api_key=api_key)
         self._model = model
+        self.last_usage: TokenUsage | None = None
 
     async def classify(self, question: str) -> IntentClassification:
         response = await self._client.messages.create(
@@ -122,6 +132,12 @@ class AnthropicIntentClassifier:
             ],
             tool_choice={"type": "tool", "name": "classify_intent"},
         )
+        if response.usage:
+            self.last_usage = TokenUsage(
+                prompt_tokens=response.usage.input_tokens,
+                completion_tokens=response.usage.output_tokens,
+            )
+
         for block in response.content:
             if block.type == "tool_use":
                 return _coerce(block.input)

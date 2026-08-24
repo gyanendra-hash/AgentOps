@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from app.tools import ToolSpec
+from app.tracing import TokenUsage
 
 SYSTEM_PROMPT = (
     "You are the Scheduler Agent for the AgentOps platform. Given an "
@@ -43,6 +44,7 @@ class OpenAIToolCallingLLM:
 
         self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
+        self.last_usage: TokenUsage | None = None
 
     async def decide(self, question: str, tools: list[ToolSpec]) -> ToolDecision:
         tool_defs = [{"type": "function", "function": _tool_schema(spec)} for spec in tools]
@@ -54,6 +56,12 @@ class OpenAIToolCallingLLM:
             ],
             tools=tool_defs,
         )
+        if response.usage:
+            self.last_usage = TokenUsage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+            )
+
         message = response.choices[0].message
         if not message.tool_calls:
             return ToolDecision(tool_name=None, rationale=message.content or "")
@@ -68,6 +76,7 @@ class AnthropicToolCallingLLM:
 
         self._client = AsyncAnthropic(api_key=api_key)
         self._model = model
+        self.last_usage: TokenUsage | None = None
 
     async def decide(self, question: str, tools: list[ToolSpec]) -> ToolDecision:
         tool_defs = [
@@ -85,6 +94,12 @@ class AnthropicToolCallingLLM:
             messages=[{"role": "user", "content": question}],
             tools=tool_defs,
         )
+        if response.usage:
+            self.last_usage = TokenUsage(
+                prompt_tokens=response.usage.input_tokens,
+                completion_tokens=response.usage.output_tokens,
+            )
+
         for block in response.content:
             if block.type == "tool_use":
                 return ToolDecision(tool_name=block.name, args=block.input)

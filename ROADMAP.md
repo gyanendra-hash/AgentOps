@@ -137,11 +137,31 @@ monitoring becomes a primary use case.
 
 ## Milestone 6 — Guardrails + Observability (Production-readiness)
 
-- [ ] 6.1 — Langfuse SDK integration
-- [ ] 6.2 — Per-node latency and token-cost tracking
-- [ ] 6.3 — 20-query evaluation set
-- [ ] 6.4 — Eval run, routing/tool-call accuracy measured, failures logged
-- [ ] 6.5 — Confirmation-flow hardening (timeout on unconfirmed destructive action)
-- [ ] 6.6 — Final bug-fix/polish pass, README + demo script
+- [x] 6.1 — Langfuse SDK integration — `services/agent_ops/app/tracing.py::LangfuseExporter`, no-ops (never raises) unless `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are set
+- [x] 6.2 — Per-node latency and token-cost tracking — `Tracer`, always on regardless of Langfuse config; every `/v1/agent/*` and `/v1/debug/ask` response includes a `trace` field (`[{node, latency_ms, usage}]`)
+- [x] 6.3 — 20-query evaluation set — `services/agent_ops/eval/eval_set.py`, covering all four intents plus deliberately ambiguous cases
+- [x] 6.4 — Eval run, routing accuracy measured, failures logged — `app/eval.py::run_eval`/`format_report`, driven for real by `scripts/run_eval.py` (needs an LLM key) or against fakes by `tests/test_eval.py`
+- [x] 6.5 — Confirmation-flow hardening (timeout on unconfirmed destructive action) — fixed a real bug here: `PendingActionStore` was setting Redis `EX` in whole seconds, silently truncating any sub-second `CONFIRMATION_TTL_SECONDS` to 0 (immediately expired); switched to `PX` (milliseconds). `test_confirmation_expires_after_ttl_elapses` covers it
+- [x] 6.6 — Final bug-fix/polish pass, README + demo script — `scripts/dev/demo.sh` / `demo.ps1` walk every milestone's headline capability against a running `docker compose up` stack
 
-**Status: not started.**
+**Status: complete.** 174 tests passing (17 rate-limiter, 10 gateway, 48
+scheduler, 13 worker-pool, 86 agent-ops), plus `scripts/run_eval.py` as a
+real (non-fake) check available once an LLM API key is configured.
+
+**Bug found and fixed during this milestone (not cosmetic):** building
+per-node tracing initially bound a single `Tracer` instance into each
+LangGraph node's closure at graph-*build* time. Every graph is compiled once
+at service startup and reused across every concurrent request, so that
+would have accumulated every request's spans into one shared, ever-growing
+list — wrong data attributed to the wrong request, plus an unbounded memory
+leak. Fixed before it shipped: each graph node now reads a `Tracer` from
+`state["tracer"]`, set fresh per `ainvoke()` call by whoever invokes the
+graph. `test_concurrent_graph_invocations_get_isolated_traces` is a
+regression test for exactly this.
+
+**Known limitation carried forward:** Langfuse's own trace/span timing uses
+wall-clock start/end timestamps that this integration doesn't currently
+pass through (only `latency_ms` in metadata) — accurate enough for cost and
+duration review in the Langfuse UI, but the trace timeline won't show
+precise start times relative to other traces. Would need `datetime.now()`
+captured at span start/end rather than just `time.perf_counter()` deltas.

@@ -4,7 +4,13 @@
 graphs/functions already built in Milestones 3 and 4
 (app/graph.py::build_graph, app/scheduler_agent.py::build_scheduler_agent_graph)
 and the new Monitor Agent (app/monitor_agent.py) -- this module's only new
-logic is classification and routing between them."""
+logic is classification and routing between them.
+
+ROADMAP 6.2: one `Tracer` per invocation, put in the state passed to
+`ainvoke()` (never baked into the compiled graph, which is built once at
+startup and shared across every request/concurrent user) -- forwarded into
+whichever sub-graph gets invoked so a single trace covers the whole request,
+not just the orchestrator's own `classify` node."""
 
 from typing import Any, TypedDict
 
@@ -15,7 +21,10 @@ from app.monitor_agent import run_monitor
 from app.pending_actions import PendingActionStore
 from app.rate_limiter_client import RateLimiterClient
 from app.scheduler_client import SchedulerClient
+from app.tracing import Tracer
 
+#: `tracer` deliberately excluded here -- every call site sets it explicitly
+#: (ordered *after* this spread) to the current request's Tracer instance.
 _SCHEDULER_AGENT_INITIAL_STATE = {
     "tool_name": None,
     "tool_args": {},
@@ -38,6 +47,7 @@ class OrchestratorState(TypedDict):
     confirmation_token: str | None
     result: Any
     sources: list[str]
+    tracer: Any  # Tracer, per-invocation -- see module docstring
 
 
 def build_orchestrator_graph(
@@ -49,7 +59,10 @@ def build_orchestrator_graph(
     pending_actions: PendingActionStore,
 ):
     async def classify(state: OrchestratorState) -> dict:
-        classification = await intent_classifier.classify(state["question"])
+        tracer: Tracer = state.get("tracer") or Tracer()
+        with tracer.span("classify_intent"):
+            classification = await intent_classifier.classify(state["question"])
+        tracer.record_usage("classify_intent", getattr(intent_classifier, "last_usage", None))
         return {
             "intent": classification.intent,
             "client_id": classification.client_id,
@@ -65,7 +78,11 @@ def build_orchestrator_graph(
 
     async def run_scheduler_agent(state: OrchestratorState) -> dict:
         result = await scheduler_agent_graph.ainvoke(
-            {"question": state["question"], **_SCHEDULER_AGENT_INITIAL_STATE}
+            {
+                "question": state["question"],
+                "tracer": state.get("tracer"),
+                **_SCHEDULER_AGENT_INITIAL_STATE,
+            }
         )
         return {
             "response": result["response"],
@@ -76,17 +93,25 @@ def build_orchestrator_graph(
 
     async def run_debug_agent(state: OrchestratorState) -> dict:
         result = await debug_graph.ainvoke(
-            {"question": state["question"], "retrieved_context": [], "sources": [], "answer": ""}
+            {
+                "question": state["question"],
+                "tracer": state.get("tracer"),
+                "retrieved_context": [],
+                "sources": [],
+                "answer": "",
+            }
         )
         return {"response": result["answer"], "sources": result["sources"]}
 
     async def run_monitor_agent(state: OrchestratorState) -> dict:
-        response, data = await run_monitor(
-            scheduler_client,
-            rate_limiter_client,
-            client_id=state.get("client_id"),
-            tier=state.get("tier") or "default",
-        )
+        tracer: Tracer = state.get("tracer") or Tracer()
+        with tracer.span("monitor"):
+            response, data = await run_monitor(
+                scheduler_client,
+                rate_limiter_client,
+                client_id=state.get("client_id"),
+                tier=state.get("tier") or "default",
+            )
         return {"response": response, "result": data}
 
     async def clarify_intent(state: OrchestratorState) -> dict:
@@ -123,6 +148,8 @@ def build_orchestrator_graph(
     return builder.compile()
 
 
+#: `tracer` deliberately excluded here -- the caller sets it explicitly
+#: (ordered *after* this spread) to the current request's Tracer instance.
 INITIAL_ORCHESTRATOR_STATE = {
     "intent": None,
     "client_id": None,

@@ -8,7 +8,11 @@ can't mean pausing mid-graph -- `clarify` parks the decision in
 PendingActionStore and ends the graph; a *separate* request
 (POST /v1/agent/confirm) redeems the token via `execute_confirmed_action`,
 reusing the same tool-execution/response-formatting logic as the graph's own
-`execute_tool` node."""
+`execute_tool` node.
+
+ROADMAP 6.2: the graph is compiled once at startup and reused across every
+request, so (as in app/graph.py) a `Tracer` can't be baked into the node
+closures -- callers put a fresh `Tracer()` in the state they invoke with."""
 
 from typing import Any, TypedDict
 
@@ -19,6 +23,7 @@ from app.pending_actions import PendingActionStore
 from app.scheduler_client import SchedulerClient, SchedulerUnavailableError
 from app.tool_llm import ToolCallingLLM
 from app.tools import TOOLS, InvalidToolArgsError, UnknownToolError, execute_tool
+from app.tracing import Tracer
 
 
 class SchedulerAgentState(TypedDict):
@@ -31,6 +36,7 @@ class SchedulerAgentState(TypedDict):
     result: Any
     error: str | None
     response: str
+    tracer: Any  # Tracer, per-invocation -- see module docstring
 
 
 def _describe_tool_call(tool_name: str, args: dict) -> str:
@@ -76,7 +82,10 @@ def build_scheduler_agent_graph(
     pending_actions: PendingActionStore,
 ):
     async def decide_tool(state: SchedulerAgentState) -> dict:
-        decision = await tool_llm.decide(state["question"], list(TOOLS.values()))
+        tracer: Tracer = state.get("tracer") or Tracer()
+        with tracer.span("decide_tool"):
+            decision = await tool_llm.decide(state["question"], list(TOOLS.values()))
+        tracer.record_usage("decide_tool", getattr(tool_llm, "last_usage", None))
         return {
             "tool_name": decision.tool_name,
             "tool_args": decision.args,
@@ -100,7 +109,9 @@ def build_scheduler_agent_graph(
         }
 
     async def execute_tool_node(state: SchedulerAgentState) -> dict:
-        result, error = await _run_tool(scheduler_client, state["tool_name"], state["tool_args"])
+        tracer: Tracer = state.get("tracer") or Tracer()
+        with tracer.span("execute_tool"):
+            result, error = await _run_tool(scheduler_client, state["tool_name"], state["tool_args"])
         return {"result": result, "error": error}
 
     async def respond(state: SchedulerAgentState) -> dict:
