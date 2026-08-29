@@ -192,9 +192,13 @@ All 174 pass on a clean checkout (`services/rate_limiter`, `services/gateway`,
 limiter's atomic Token Bucket/Sliding Window scripts and the scheduler's
 leader-election compare-and-swap) via [`lupa`](https://github.com/scoder/lupa),
 which isn't a hard dependency of `fakeredis` itself — install it explicitly
-(now pinned in every `requirements-dev.txt` that depends on `fakeredis`) or
-those services' Redis-scripted tests fail with `unknown command 'evalsha'`
-instead of a clear "install lupa" error.
+(now pinned in `services/rate_limiter/requirements-dev.txt` and
+`services/scheduler/requirements-dev.txt`, the only two services whose tests
+actually call a Lua script through `fakeredis`) or those services'
+Redis-scripted tests fail with `unknown command 'evalsha'` instead of a
+clear "install lupa" error. `services/agent_ops` and `services/worker_pool`
+also use `fakeredis` in tests but only for plain `GET`/`SET`/`DELETE`, so
+they don't need it.
 
 `services/agent_ops/scripts/run_eval.py` is the one script in this repo
 meant to make a real LLM call rather than run against a fake — it drives the
