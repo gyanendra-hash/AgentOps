@@ -185,6 +185,16 @@ reach the correct specialist, and an agent-ops test that runs two graph
 invocations concurrently with separate tracers and asserts neither sees the
 other's spans (a regression test for a real bug caught while building
 Milestone 6 — see [Observability (Milestone 6)](#observability-milestone-6)).
+All 174 pass on a clean checkout (`services/rate_limiter`, `services/gateway`,
+`services/scheduler`, `services/worker_pool`, `services/agent_ops`).
+
+`fakeredis` emulates Redis's Lua `EVAL`/`EVALSHA` (used by the rate
+limiter's atomic Token Bucket/Sliding Window scripts and the scheduler's
+leader-election compare-and-swap) via [`lupa`](https://github.com/scoder/lupa),
+which isn't a hard dependency of `fakeredis` itself — install it explicitly
+(now pinned in every `requirements-dev.txt` that depends on `fakeredis`) or
+those services' Redis-scripted tests fail with `unknown command 'evalsha'`
+instead of a clear "install lupa" error.
 
 `services/agent_ops/scripts/run_eval.py` is the one script in this repo
 meant to make a real LLM call rather than run against a fake — it drives the
@@ -422,6 +432,16 @@ confirmation has expired or was already used" rather than an error.
 - **Clock skew.** The Lua scripts read time from Redis's own `TIME` command
   instead of trusting each Gateway/Rate-Limiter replica's system clock, so
   limits stay correct even if replica clocks drift.
+- **The Sliding Window Counter decays gradually, not at a hard boundary.**
+  `estimated = previous_count * weight_previous + current_count` means a
+  client denied at the end of one window is still partly counted well after
+  that window ends — `weight_previous` only reaches 0 once a full window has
+  elapsed since crossing into the new one. A test asserting "denied, then
+  allowed again `window_seconds` later" was flaky by construction because of
+  this: depending on exactly when in the original window the requests
+  landed, one `window_seconds` of sleep isn't always enough. Fixed by
+  sleeping `2 * window_seconds`, which is enough in the worst case
+  regardless of timing (`test_window_slides_after_time_passes`).
 - **Fail-open by default.** If the Gateway can't reach the Rate Limiter, it
   lets the request through rather than returning 503 for everything —
   availability of the core path is prioritized over strict limit enforcement,
@@ -615,3 +635,11 @@ Observability — are implemented and tested. 174 tests pass without any
 external dependency; `services/agent_ops/scripts/run_eval.py` is the one
 additional check that needs a real `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` to
 run.
+
+Independently re-verified on a clean checkout across all five services (17
+rate-limiter + 10 gateway + 48 scheduler + 13 worker-pool + 86 agent-ops =
+174/174 passing), which surfaced and fixed two real bugs the existing suite
+hadn't caught: a missing `lupa` dev dependency (`fakeredis`'s Lua/`EVALSHA`
+support silently needs it) and a flaky sliding-window test with an
+insufficient sleep margin — see [Running tests](#running-tests) and
+[Design decisions](#design-decisions) for both.

@@ -38,7 +38,12 @@ async def test_window_slides_after_time_passes(redis_client):
     denied = await limiter.check(redis_client, "sw:c", tier, 1)
     assert denied.allowed is False
 
-    await asyncio.sleep(1.1)
+    # The weighted sliding-window estimate keeps decaying the previous
+    # window's count until a full window has elapsed since crossing into a
+    # new one, so a full 2 window-lengths must pass (worst case: the
+    # original requests landed right at the start of their window) before
+    # the previous window is guaranteed to no longer contribute.
+    await asyncio.sleep(2 * tier.window_seconds + 0.1)
 
     allowed_again = await limiter.check(redis_client, "sw:c", tier, 1)
     assert allowed_again.allowed is True
